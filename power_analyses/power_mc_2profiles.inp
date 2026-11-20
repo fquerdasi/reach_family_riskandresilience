@@ -1,0 +1,67 @@
+TITLE:
+  Power analysis for LPA (2 classes, n=212, 10 continuous indicators, 60/40 proportions,
+  d=0.8, 5% MCAR, VLMR test);
+
+MONTECARLO:
+  NAMES = y1-y10;
+  NOBS = 212;               ! Change as needed: 150, 200, 280, 350, 500
+  NREP = 2000;               ! Use 2000 for final power estimates
+  SEED = 3454367;
+  GENCLASSES = c(2);        ! True number of classes
+  CLASSES = c(2);           ! Estimated number of classes (must match for power)
+  ! To test power, we compare 1-class vs 2-class using VLMR.
+  ! Therefore the estimated model below is the 2-class model, and TECH11/TECH14
+  ! provide the p-value for 1-class vs 2-class.
+ 
+  ! Generate missing data: 15% MCAR on each variable
+  ! TYPE = MISSING;
+  ! MISSING = y1-y10;
+  ! MCAR = 0.05;              ! 15% missing completely at random
+  ! PATMISS = y1-y10 (0.05);
+
+  ! Save data if needed (optional)
+  ! SAVE = simdata.dat;
+  
+ANALYSIS:
+  TYPE = MIXTURE;
+  STARTS = 100 10;          ! 100 random starts, 10 final optimizations
+  LRTSTARTS = 0 0 20 10;    ! For VLMR, use default or specify
+  PROCESSORS = 2;           ! Use multiple processors if available
+
+MODEL POPULATION:
+
+  %OVERALL%
+  [C#1*0.405];              ! Logit for class 1 probability: log(0.6/0.4) = ln(1.5) ≈ 0.405
+                            ! Class 2 is reference (C#2 not shown)
+
+  %C#1%
+  [y1-y10*1.0];            ! Class 1 means = 1.0
+  y1-y10*1.0;              ! Variances = 1.0, covariances = 0 (local independence)
+
+  %C#2%
+  [y1-y10*0.2];            ! Class 2 means = 0.2 → difference = 0.8 (Cohen's d = 0.8)
+  y1-y10*1.0;              ! Same variances = 1.0
+  
+
+
+MODEL:
+
+  ! Estimated model: same as population (2-class model)
+  ! This model will be compared to a 1-class model via VLMR (TECH11/TECH14)
+
+  %OVERALL%
+  [C#1*0];                 ! Starting value for class proportion (will be estimated)
+  y1-y10*1;                ! Starting values for variances (same across classes)
+
+  %C#1%
+  [y1-y10*1];              ! Starting values for means – class 1
+
+
+  %C#2%
+  [y1-y10*0.2];            ! Starting values for means – class 2
+
+
+OUTPUT:
+  TECH11 TECH14;           ! VLMR (Vuong-Lo-Mendell-Rubin) and LMR-LRT p-values
+  SAMPSTAT;                ! Sample statistics (optional)
+  TECH9;                   ! Convergence and replication summary (optional)

@@ -1,0 +1,68 @@
+TITLE: Monte Carlo Power Study for 3-Class LPA with N=212, 50/30/20 proportions,
+  d=0.8, 5% MCAR, VLMR test);
+
+MONTECARLO:
+  NAMES = y1-y10;
+  NOBSERVATIONS = 212;
+  NREPS = 2000;             ! number of simulated datasets, starting small to tweak syntax and then will increase to 1000 for final run
+  SEED = 12345;
+  CLASSES = c(3);
+  GENCLASSES = c(3);           ! number of latent classes in the model
+  CATEGORICAL = ;           ! indicators are continuous
+  ! SAVE = lpa_mc_results_3profiles.dat;
+
+ANALYSIS:
+  TYPE = MIXTURE;
+  STARTS = 100 10;          ! 100 random starts, 10 final optimizations
+  LRTSTARTS = 0 0 1000 100;    ! For VLMR, specified higher due to output warnings 
+  PROCESSORS = 2;           ! Use multiple processors if available
+
+
+  ! Population parameters
+      
+MODEL POPULATION:
+
+   %OVERALL%
+  [C#1*0.916];   ! Logit for class 1 probability: log(P1/P3) = log(0.5/0.2) ≈ 0.916
+  [C#2*0.405];   ! Logit for class 2 probability: log(P2/P3) = log(0.3/0.2) ≈ 0.405
+                 ! Class 3 is reference (20% of sample)
+  
+  %OVERALL%
+  [C#1*0.405];              ! Logit for class 1 probability: log(0.6/0.4) = ln(1.5) ≈ 0.405
+                            ! Class 2 is reference (C#2 not shown)
+
+  %C#1%
+  [y1-y10*1.0];            ! Class 1 means = 1.0
+  y1-y10*1.0;              ! Variances = 1.0, covariances = 0 (local independence)
+
+  %C#2%
+  [y1-y10*0.2];            ! Class 2 means = 0.2 → difference = 0.8 (Cohen's d = 0.8)
+  y1-y10*1.0;              ! Same variances = 1.0
+  
+  %C#3%
+  [y1-y10*-0.6];  ! example: Class 3 is lowest-mean class
+  y1-y10*1.0;
+  
+MODEL:
+    ! Class probabilities
+    %OVERALL%
+
+    ! Class 1 (30% of N)
+    %C#1%
+      [Y1@2 Y2@2 Y3@2 Y4@2 Y5@2 Y6@2 Y7@2 Y8@2 Y9@2 Y10@2];     ! means for class 1 (class-specific)
+      Y1-Y10*1;              ! SDs for class 1
+
+    ! Class 2 (40% of N)
+    %C#2%
+      [Y1@5 Y2@5 Y3@5 Y4@5 Y5@5 Y6@5 Y7@5 Y8@5 Y9@5 Y10@5];     ! means for class 2
+      Y1-Y10*1;              ! SDs for class 2
+
+    ! Class 3 (30% of N)
+    %C#3%
+      [Y1@8 Y2@8 Y3@8 Y4@8 Y5@8 Y6@8 Y7@8 Y8@8 Y9@8 Y10@8];     ! means for class 3
+      Y1-Y10*1;              ! SDs for class 3
+      
+OUTPUT:
+  TECH11 TECH14;           ! VLMR (Vuong-Lo-Mendell-Rubin) and LMR-LRT p-values
+  SAMPSTAT;                ! Sample statistics (optional)
+  TECH9;                   ! Convergence and replication summary (optional)

@@ -1,5 +1,5 @@
 # reach_family_riskandresilience
-Analysis code for a paper examining patterns of family risk and resilience factors to early childhood vulnerability to intergenerational transmission of abdominal pain
+Analysis scripts (Mplus and R) for a paper examining patterns of family risk and resilience factors to early childhood vulnerability to intergenerational transmission of abdominal pain. 
 
 **Citation**:
 

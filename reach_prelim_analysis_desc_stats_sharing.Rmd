@@ -1,0 +1,849 @@
+---
+title: "reach_prelim_analysis_desc_stats"
+author: "FQ"
+date: "2025-10-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+## Load libraries
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(gtsummary)
+  library(gt)
+  library(forcats)
+  library(Hmisc)
+  library(corrplot)
+  library(stats)
+  library(psych)
+  })
+```
+
+## Load data
+```{r}
+# new dataset
+demodata <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_Abstract_3-31-2026.csv") |>
+  # remove questionnaire vars bc those will be read in from values dataset
+  dplyr::select(
+    -contains("arcs"),
+    -contains("phq"),
+    -contains("gad"),
+    -contains("pcs"),
+    -contains("mspss"),
+    -contains("ibs"),
+    -contains("dpcb"),
+    -contains("cssi"),
+    -contains("panas"),
+    -contains("ql_"),
+    -contains("rome"),
+    -pain_duration,
+    -total_ppp,
+    -(contains("c5_") & !contains("coi")),
+    -(contains("r_") & !contains("coi")),
+    -(contains("z_") & !contains("coi"))
+  )
+
+# read in dataset with numeric values for questionnaire items
+items <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_Abstract_Values_3-31-2026.csv") |>
+  dplyr::select(
+    study_id,
+    contains("arcs"),
+    contains("phq"),
+    contains("gad"),
+    contains("pcs"),
+    contains("mspss"),
+    contains("ibs"),
+    contains("dpcb"),
+    # add ROME FAP and CSSI 11.20
+    contains("cssi"),
+    contains("rome")
+  )
+
+# add pedsql data and additional coi variables (3 subdomains), more in Dec
+new <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_Abstract_Values_3-31-2026.csv") %>% 
+  dplyr::select(
+    study_id,
+    contains("ql"),
+    contains("c5_") & !contains("coi"),
+    contains("r_") & !contains("coi"),
+    contains("z_") & !contains("coi"),
+    # add household members w pain
+    partner_pain = mh21___1,
+    grandpar_pain = mh21___2,
+    sitter_pain = mh21___3,
+    sibling_pain = mh21___4,
+    auntunc_pain = mh21___5,
+    others_pain = mh21___6,
+    nobody_pain = mh21___7,
+    # add familiy resilience variables
+    fammeal_days = bqp32,
+    famresil_talk = bqp33,
+    famresil_collab = bqp34,
+    famresil_strength = bqp35,
+    famresil_hope = bqp36,
+    # add PANAS, parent pain problems and duration of pain problems, total_ppp
+    contains("panas"),
+    pp_headache = mh1___1,
+    pp_abpain = mh1___2,
+    pp_muscjoint = mh1___3,
+    pp_fibro = mh1___4,
+    pp_other = mh1___5,
+    pp_none = mh1___6,
+    # pp_other_desc = mh2,
+    total_ppp,
+    dur_migraine = mh3,
+    dur_abpain = mh4,
+    dur_muscjoint = mh5,
+    dur_fibro = mh6,
+    dur_otherpp = mh7,
+    pain_duration,
+    pp_other_specify = mh2,
+    # other medical conditions
+    medcond_arth = mh9___1,
+    medcond_diab = mh9___2,
+    medcond_cancer = mh9___3,
+    medcond_kidney = mh9___4,
+    medcond_asthma = mh9___5,
+    medcond_heart = mh9___6,
+    medcond_stroke = mh9___7,
+    medcond_crohns = mh9___8,
+    medcod_colitis = mh9___9,
+    medcond_ulcer = mh9___10,
+    medcond_epilepsy = mh9___11,
+    medcond_other = mh9___12,
+    medcond_none = mh9___13,
+    medcond_cancer_type = mh10,
+    medcond_other_spec = mh11
+  )
+# LOTS of PedsQL variables
+
+# make smaller df with just a few variables to add to 
+new_short <- new %>% 
+  dplyr::select(
+    study_id,
+    ql_source,
+    ql_pfs,
+    ql_efs,
+    ql_socfs,
+    ql_scfs,
+    ql_phs,
+    ql_tots,
+    contains("c5_"),
+    contains("r_"),
+    contains("z_"),
+    contains("_pain"),
+    contains("fam"),
+    contains("pp"),
+    contains("dur"),
+    contains("panas"),
+    contains("medcond")
+  )
+
+# merge
+alldata <- demodata |> 
+  full_join(items, by = "study_id") %>% 
+  full_join(new_short, by = "study_id")
+
+# check
+test <- alldata %>% 
+  dplyr::select(contains(".x"))
+
+# raw data check
+# rawdata <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_raw_baseline_data_4.1.26.csv") %>% 
+#   dplyr::mutate(
+#     study_id = paste0("REACH", sprintf("%04d", record_id))) %>% 
+#   relocate(study_id, .before = everything())
+# 
+# setdiff(rawdata$study_id, alldata$study_id) # REACH0518 -- missing 1/2 of T1 data so didn't use
+```
+ql_pfs:panas_na
+c5_ed_nat:z_se_nat
+
+## Load recruitment data
+This is downloaded from REDcap with Recruitment event selected ("recruitment_arm_1" arm)
+```{r}
+rec_data <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_recruitment_data_4-1-2026.csv") %>% 
+  dplyr::select(
+    record_id,
+    source,
+    othsource,
+    prov
+  ) %>% 
+  mutate(
+    study_id = paste0("REACH", str_pad(record_id, width = 4, pad = "0"))) %>% 
+  dplyr::select(-record_id) %>% 
+  dplyr::mutate(
+    source = case_when(
+      source == 1 ~ "Reddit - R/IBS",
+      source == 2 ~ "Facebook Ad",
+      source == 3 ~ "Seattle Children's Inclusion
+Network Newsletter",
+      source == 4 ~ othsource,
+      source == 5 ~ "Health Care Provider",
+      source == 6 ~ "School/school district outreach",
+      source == 7 ~ "ResearchMatch",
+      source == 8 ~ "Email Outreach",
+      source == 9 ~ "Cape Fear Valley Medical Center"
+    )
+  )
+
+alldata <- alldata %>% 
+  left_join(rec_data, by = "study_id")
+```
+
+
+
+# Cleaning
+## Parent gender
+currently 8 categories (each yes/no), recode to 1 var
+```{r}
+alldata <- alldata |>
+  mutate(
+    pgender = case_when(
+      bqp6___1 == "Checked" ~ "Woman",
+      bqp6___2 == "Checked" ~ "Man",
+      bqp6___3 == "Checked" ~ "Trans_fem",
+      bqp6___4 == "Checked" ~ "Trans_masc",
+      bqp6___5 == "Checked" ~ "Nonbinary",
+      bqp6___6 == "Checked" ~ "Genderqueer",
+      bqp6___7 == "Checked" ~ "Questioning",
+      bqp6___8 == "Checked" ~ "Prefer not to respond",
+      bqp6___9 == "Checked" ~ bqp7,
+    )
+  )
+```
+
+## Renaming and recoding variables
+```{r}
+alldata <- alldata |>
+  rename(
+    child_age = bqp2,
+    child_sex = dqp3,
+    parent_age = bqp4,
+    parent_sex = bqp5,
+    parent_eth = bqp10,
+    child_eth = bqp13,
+    num_ppl_household = bqp16,
+    num_child_household = bqp17,
+    parent_edu = bqp19,
+    parent_work = bqp20,
+    relationstatus = bqp23,
+    partner_edu = bqp24,
+    partner_work = bqp25,
+    child_daycare_time = bqp29,
+    child_othercg_time = bqp30,
+    # leave insurance type alone for now
+    household_income = bqp37,
+    language_notEnglish = bqp38,
+    English_fluency = bqp39
+  ) |>
+  mutate( # combine vars that have other, write in responses
+    relationchild = ifelse(bqp8=="Other, write here:", bqp9, bqp8),
+    notwork_reason = ifelse(bqp21=="Other, write here:", bqp22, bqp21),
+    partner_notwork_reason = ifelse(bqp26=="Other, write here:", "other", bqp26),
+    child_outsidecare = case_when(
+      bqp28___1	== "Checked" & bqp28___2	== "Unchecked" ~ "Yes, at school or daycare",
+      bqp28___1	== "Checked" & bqp28___2	== "Checked" ~ "Yes, at school/daycare and with other caregivers",
+      bqp28___1	== "Unchecked" & bqp28___2	== "Checked" ~ "Yes, with other caregivers",
+      bqp28___3	== "Checked" ~ "No"
+    ),
+    partner_pain = case_when(
+      mh21___1	== "Checked" ~ 1,
+      mh21___1	== "Unchecked" ~ 0
+    ),
+    grandparents_pain = case_when(
+      mh21___2	== "Checked" ~ 1,
+      mh21___2	== "Unchecked" ~ 0
+    ),
+    sitters_pain = case_when(
+      mh21___3	== "Checked" ~ 1,
+      mh21___3	== "Unchecked" ~ 0
+    ),
+    siblings_pain = case_when(
+      mh21___4	== "Checked" ~ 1,
+      mh21___4	== "Unchecked" ~ 0
+    ),
+    auntuncle_pain = case_when(
+      mh21___5	== "Checked" ~ 1,
+      mh21___5	== "Unchecked" ~ 0
+    ),
+    others_pain = case_when(
+      mh21___6	== "Checked" ~ 1,
+      mh21___6	== "Unchecked" ~ 0
+    ),
+    ql_source = case_when(
+      ql_source == 2 ~ "Toddler",
+      ql_source == 1 ~ "Young_Child"
+    ),
+    # make binary education variables for use in analyses
+    parent_college = ifelse(parent_edu == "Bachelors degree" | parent_edu == "Graduate degree (e.g., Master, Doctoral)", 1, 0),
+    parent_graddeg = ifelse(parent_edu == "Graduate degree (e.g., Master, Doctoral)", 1, 0),
+    # recode prefer not to respond to NA for ethnicity to get binary var for testing
+    parent_eth_bin = ifelse(parent_eth == "Prefer not to respond", NA, parent_eth)
+  )
+```
+
+## Create more household pain variables
+```{r}
+alldata <- alldata |>
+  mutate(
+    num_caregivers_pain = partner_pain + grandpar_pain + sitter_pain + auntunc_pain,
+    num_biocare_pain = partner_pain + grandpar_pain + auntunc_pain
+  )
+```
+
+## Calculate family resilience variables
+```{r}
+alldata <- alldata |>
+  mutate(
+    fammeal_days = case_when(
+      fammeal_days == 1 ~ "0 days",
+      fammeal_days == 2 ~ "1-3 days",
+      fammeal_days == 3 ~ "4-6 days",
+      fammeal_days == 4 ~ "Every day",
+      is.na(fammeal_days) ~ NA
+    ),
+    famresil_total = ifelse(rowSums(is.na(select(new_short, contains("famresil")))) < 2, rowMeans(select(new_short, contains("famresil")), na.rm=TRUE), NA) 
+  )
+```
+
+## Partner without chronic pain variable
+```{r}
+test <- alldata |>
+  dplyr::select(study_id, relationstatus, contains("_pain"), num_ppl_household, num_child_household, num_biocare_pain) %>% 
+  mutate(
+    num_adults_household = num_ppl_household - num_child_household,
+    coparent_status = case_when(
+      relationstatus=="Married/Living with Partner" & partner_pain == 0 ~ "coparent_nopain",
+      relationstatus=="Married/Living with Partner" & partner_pain == 1 ~ "coparent_pain",
+      relationstatus!="Married/Living with Partner" & partner_pain == 1 ~ "check",
+      relationstatus!="Married/Living with Partner" & partner_pain == 0 ~ "no_coparent"),
+    # if they have partner they indicated has pain but they don't live together
+    coparent_status = ifelse(coparent_status=="check" & num_adults_household == 1, "no_coparent", coparent_status),
+    # final person with 'check' is divorced but partner has pain and living with another adult -- NA
+    coparent_status = ifelse(coparent_status=="check" & num_adults_household>=1, NA, coparent_status)
+  )
+
+# this in imperfect bc there are people who are living with other adults in househodl with no_coparent status
+cases <- test %>% 
+  dplyr::filter(coparent_status == "no_coparent" & num_adults_household > 1)
+
+# 3 of these have nobody else in household with pain: 2 of them have grandparents with pain, 1 has sibling with pain
+# some of these could be adult children? 
+
+# count number with partner pain
+test %>% dplyr::count(coparent_status) # 104 with coparent no pain, 55 with coparent pain 
+```
+There are 3 people who said their partner has pain but didn't indicate they were married/living with partner. Two of those said that there is 1 adult in the household, so can put those as "no_coparent". The third person said they were divorced but also that there were 2 adults in household. So for that person, will recode coparent_status to be NA (unclear if partner is living in household or not)
+
+## Recode IBS-SSS for those who said no to first question and rescore IBS-SSS
+So the follow-up question responses are 0 instead of NA
+```{r}
+# recode 
+alldata <- alldata |>
+  mutate(
+    # how severe is your abdominal pain? recode to 0 people who said no
+    ibs1b = ifelse(ibs1a == 0, 0, ibs1b),
+    # how many days out of 10 do you get abdominal pain? use var recoded to 0-100 scale
+    ibs1cr = ifelse(ibs1a == 0, 0, ibs1cr),
+    # recode to 0 people who said no 
+    ibs2b = ifelse(ibs2a == 0, 0, ibs2b)
+    # recode people who looks like left the slider at default (50) -- did not do this bc Hafsah said data quality check confirmed those ps missed that Q
+    #ibs2b = ifelse(ibs2a == 1 & is.na(ibs2b), 50, ibs2b)
+  )
+
+# study ids for those who have ibs2a = 1 but NA for ibs2b
+alldata$study_id[alldata$ibs2a == 1 & is.na(alldata$ibs2b)] # highest is 477
+
+# rescore
+# create number missing var
+# if number missing less than or equal to 1, rowmean * 5
+
+alldata <- alldata |>
+  mutate(
+    ibs_miss = rowSums(is.na(across(all_of(c("ibs1b", "ibs1cr", "ibs2b", "ibs3", "ibs4"))))),
+    ibs_tot_re = ifelse(ibs_miss < 2, rowMeans(across(all_of(c("ibs1b", "ibs1cr", "ibs2b", "ibs3", "ibs4"))), na.rm=TRUE) * 5, NA),
+    ibs_cat_re = case_when(
+      ibs_tot_re < 75 ~ "little to no symptom severity",
+      ibs_tot_re >= 75 & ibs_tot_re < 175 ~ "mild IBS symptoms",
+      ibs_tot_re >= 175 & ibs_tot_re < 300 ~ "moderate IBS symptoms",
+      ibs_tot_re >= 300 ~ "severe IBS symptoms"
+    )
+  )
+
+check <- alldata |>
+  select(study_id, contains("ibs"), ibs_tot, ibs_tot_re, ibs_cat, ibs_cat_re)
+
+# 244, 270 are given score with this but not from Kristen's -- thse 2 look like they're only missing 1 item so keep with the ibs_tot_re for now
+```
+
+## Clean number of pain conditions
+Go through write in responses and see if anyone lists more than 1 'other' pain condition, and add those
+Generalized pain = pain in at least 4 out of 5 body regions
+I think I'll just do a binary more than 1 pain condition bc ~1/3 only have IBS; or keep number of pain conditions continuous
+```{r}
+# get people who specified other pain condition, count how many they put
+paincond <- alldata %>% 
+  dplyr::filter(!is.na(pp_other_specify)) %>% 
+  dplyr::select(study_id, contains("pp"))
+
+# ids that listed 2 other pain conditions/locations: REACH0094, REACH0109, REACH0110, REACH0223, REACH0320, REACH0399, REACH0619, REACH0768, REACH1011 (no one listed more than 2)
+alldata <- alldata %>% 
+  dplyr::mutate(
+    total_ppp = ifelse(study_id %in% c("REACH0094", "REACH0109", "REACH0110", "REACH0223", "REACH0320", "REACH0399", "REACH0619", "REACH0768", "REACH1011"), total_ppp + 1, total_ppp)
+  )
+```
+
+## Clean pain duration
+A few people put number of years greater than their age
+REACH0271 - parent age is 4 (??) --> decided to ask parent again for age; until hear back, replace with NA
+REACH0212 - put duration of fibro 115 (probably 15, very inconsistent responses across timepoints) --> decided to replace with NA
+REACH0619 - put duratino migraine 48 when age is 41 (probably 12) --> decided to swap 48 for 12
+REACH1042 - put duration of abdominal pain as 2018. Going to assume means started experiencing in 2018 --> 8 years
+```{r}
+# generate flag to dx the issues
+test <- alldata %>% 
+  dplyr::select(study_id, parent_age, contains("dur_"), pain_duration) %>% 
+  mutate(paindur_flag = ifelse(pain_duration > parent_age, 1, 0))
+
+# implement decisions described above
+alldata[alldata$study_id == "REACH0212", "pain_duration"] <- NA
+alldata[alldata$study_id == "REACH0619", "pain_duration"] <- 12
+alldata[alldata$study_id == "REACH0271", "parent_age"] <- NA
+alldata[alldata$study_id == "REACH1042", "pain_duration"] <- 8 
+```
+
+## Calculate recruitment sources
+```{r}
+  alldata %>% 
+  dplyr::count(source) %>% 
+  mutate(percent = n / sum(n)* 100)
+```
+
+
+## CSSI scoring notes
+If equal-interval scores are preferred, the Rasch measure scores may be used rather than the CSSI-8 total sum scores. Rasch measure scores corresponding to each CSSI-8 total score appear in a lookup table in Supplementary Materials File S1. Percentile scores are also provided and may enable clinicians to compare their patients to those in the n = 876 clinic sample from this study (8-18 years, tertiary care pediatric GI clinic). (from: https://pmc.ncbi.nlm.nih.gov/articles/PMC11593210/)
+
+# Descriptive statistics
+## Number of families
+```{r}
+N <- nrow(alldata)
+```
+
+## Categorical variables: Counts and Percents
+Relationship to child, income categories, education categories, number of people in household, number of children in household, first child / not, race, ethnicity, White vs POC, language spoken at home, relationship status, number of household members with pain, IBS-SS category, child sex
+```{r}
+# recode category variables
+alldata <- alldata |>
+  mutate(
+    ibs_cat = case_when(
+      ibs_cat == 1 ~ "little to no symptom severity",
+      ibs_cat == 2 ~ "mild IBS symptoms",
+      ibs_cat == 3 ~ "moderate IBS symptoms",
+      ibs_cat == 4 ~ "severe IBS symptoms"
+    ),
+    mspss_cat = case_when(
+      mspss_cat == 1 ~ "low perceived support",
+      mspss_cat == 2 ~ "medium perceived support",
+      mspss_cat == 3 ~ "high perceived support"
+    )
+  )
+
+demo_cats <- alldata %>% 
+  mutate(
+    household_income = factor(household_income, levels = c("$24,999 or less", "$25,000 - $49,999", "$50,000 - $99,999", "$100,000 - $149,999", "$150,000 or more")),
+    parent_edu = factor(parent_edu, levels = c("Some High School or less", "GED or equivalent", "High School diploma", "Some college, no degree", "Associate degree", "Bachelors degree", "Graduate degree (e.g., Master, Doctoral)"))) %>% 
+  tbl_summary(include = c(parent_sex, pgender, child_sex, relationchild, household_income, parent_edu, parent_college, parent_graddeg, parent_work, notwork_reason, relationstatus, language_notEnglish, English_fluency, child_outsidecare, child_daycare_time, child_othercg_time, parent_eth, parent_race_nih, parent_race_bi, child_eth, child_race_nih, ibs_cat_re, total_hh_pain, mspss_cat, dpfreq_cat, dphas_cat, rome_fap, fammeal_days, oldest_child, source, state_name))
+
+table1a <- as_gt(demo_cats) 
+gtsave(table1a, filename = "tables/table1a_cat.docx")
+
+alldata %>% dplyr::count(oldest_child)
+```
+
+## Continuous variables: Mean, SD, Range
+Child age, parent age, income-to-needs ratio, IBS-SS, MPSS, ARCS, PHQ-2, PCS-SF, GAD-2, daily parenting hassles frequency total, intensity total
+PANAS NA and PA range for both is 10 to 50
+```{r}
+# clean incorrect response
+alldata <- alldata |>
+  mutate(
+    child_age = ifelse(child_age < 1, 4, child_age)
+  )
+
+demo_cont <- alldata %>% 
+  tbl_summary(include = c(parent_age, child_age, income_to_needs, num_ppl_household, num_child_household, arcsp_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, mspss_so, mspss_fam, mspss_fr, ibs_tot_re, dpfreq_tot, dphas_tot, ql_pfs, ql_efs, ql_socfs, ql_scfs, ql_phs, ql_tots, cssi_tot, cssi_rasch, cssi_pct, famresil_total, pain_duration, panasna, panaspa, total_ppp, pp_abpain, pp_headache, pp_fibro, pp_muscjoint), 
+              type = list(child_age ~ "continuous", num_ppl_household ~ "continuous", num_child_household ~ "continuous", phq_tot ~ "continuous", gad_tot ~ "continuous", total_ppp ~ "continuous"),
+              statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"
+    ))
+
+table1b <- as_gt(demo_cont)
+gtsave(table1b, filename = "tables/table1b_cont.docx")
+```
+
+# Preliminary data exploration
+## Distributions of continuous variables
+income-to-needs ratio, IBS-SS, MPSS, ARCS, PHQ-2, PCS-SF, GAD-2, daily parenting hassles frequency total, intensity total
+predictors: COI scores, income-to-needs ratio
+outcomes: PCS-SF, GAD-2, PHQ-2, daily parenting hassles frequency, daily parenting hassles intensity, ARCS
+moderators: MPSS, IBS-SSS
+```{r}
+cont_vars <- alldata |>
+  dplyr::select(income_to_needs, r_coi_nat, z_coi_nat, arcsp_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, ibs_tot_re, dpfreq_tot, dphas_tot, total_hh_pain, parent_age)
+
+x11(width = 10, height = 8)
+
+graphics.off()
+hist.data.frame(cont_vars)
+
+pedsql <- alldata |>
+  dplyr::select(contains("ql_"))
+
+hist.data.frame(pedsql)
+
+new <- alldata |>
+  dplyr::select(cssi_tot, cssi_pct, famresil_total, pain_duration, panaspa, panasna)
+
+hist.data.frame(new)
+```
+
+## Bivariate associations
+Pearson's r, t-test, ANOVA, chi-square test
+categorical variables: education (binary), birth order (binary), language (binary), white/poc (binary), nih race (multicat)
+
+To get the corrplot sig stars to appear above the numbers:
+you have to re-do this step everytime you newly loaded the corrplot package) solution:
+Change the place_points function within the corrplot function. To do so, run:
+
+trace(corrplot, edit=TRUE)
+
+Then replace on line 443
+
+place_points = function(sig.locs, point) {
+  text(pos.pNew[, 1][sig.locs], pos.pNew[, 2][sig.locs], 
+       labels = point, col = pch.col, cex = pch.cex, 
+       lwd = 2)
+with:
+
+place_points = function(sig.locs, point) {
+      text(pos.pNew[, 1][sig.locs], (pos.pNew[, 2][sig.locs])+0.25, 
+           labels = point, col = pch.col, cex = pch.cex, 
+           lwd = 2)
+           
+and then hit the "Save" button.
+```{r}
+# add peqdsql vars
+all_contvars <- alldata |>
+  dplyr::select(income_to_needs, r_coi_nat, z_coi_nat, arcsp_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, ibs_tot_re, dpfreq_tot, total_hh_pain, parent_age, contains("ql_"), -ql_source, cssi_tot, panaspa)
+
+# correlations between continuous variables
+cont_vars_corrplot <- all_contvars |> drop_na()
+
+M1 = cor(cont_vars_corrplot)
+testRes1 = cor.mtest(cont_vars_corrplot, conf.level = 0.95)
+
+corrplot(M1, p.mat = testRes1$p,
+         sig.level = 0.05, order = 'hclust', addrect = 2, type = "lower") 
+
+corrplot(M1,
+         method="color",
+         type="lower",
+         order="hclust",
+         addrect=2,
+         diag=TRUE,
+         p.mat = testRes1$p,
+         insig = "label_sig",
+         sig.level = .05,
+         pch.cex = 0.8,
+         number.cex=0.6, # change size of numbers in boxes
+         pch.col = "red",
+         tl.col="black",
+         tl.cex=0.6,
+         addCoef.col = "black",
+         tl.pos="lt",
+         cl.pos="r",
+         outline=TRUE)
+
+stats::cor.test(cont_vars_corrplot$arcsp_tot, cont_vars_corrplot$r_coi_nat)
+
+# t-test with pairs of cont and binary variables: education (college and grad, binary), birth order (binary), language (binary), white/poc (binary)
+# cont vars to test: r_coi_nat, protectiveness, pain catastrophizing, parenting hassles frequency, social support, ibs symptoms
+t.test(r_coi_nat ~ parent_college, data=alldata) # sig, higher COI in college-educated
+t.test(r_coi_nat ~ parent_graddeg, data=alldata) # sig, higher COI with grad deg 
+t.test(r_coi_nat ~ oldest_child, data=alldata) # ns (as expected)
+t.test(r_coi_nat ~ language_notEnglish, data=alldata) # ns
+t.test(r_coi_nat ~ parent_race_bi, data=alldata) # ns
+t.test(r_coi_nat ~ parent_eth_bin, data=alldata) # ns
+
+t.test(arcsp_tot ~ parent_college, data=alldata) # sig, college-educated less protective
+t.test(arcsp_tot ~ parent_graddeg, data=alldata) # sig, grad-degree less protective
+t.test(arcsp_tot ~ oldest_child, data=alldata) # ns
+t.test(arcsp_tot ~ language_notEnglish, data=alldata) # ns
+t.test(arcsp_tot ~ parent_race_bi, data=alldata) # ns
+t.test(arcsp_tot ~ parent_eth_bin, data=alldata) # ns
+
+t.test(pcs_tot ~ parent_college, data=alldata) # ns
+t.test(pcs_tot ~ parent_graddeg, data=alldata) # ns
+t.test(pcs_tot ~ language_notEnglish, data=alldata) # ns
+t.test(pcs_tot ~ parent_race_bi, data=alldata) # ns
+
+t.test(ibs_tot ~ parent_college, data=alldata) # sig, college-educated lower IBS severity
+t.test(ibs_tot ~ parent_graddeg, data=alldata) # sig
+t.test(ibs_tot ~ language_notEnglish, data=alldata) # ns
+t.test(ibs_tot ~ parent_race_bi, data=alldata) # ns
+
+t.test(mspss_tot ~ parent_college, data=alldata) # sig. college-educated more social support
+t.test(mspss_tot ~ parent_graddeg, data=alldata) # sig, grad-degree more social support
+t.test(mspss_tot ~ language_notEnglish, data=alldata) # ns
+t.test(mspss_tot ~ parent_race_bi, data=alldata) # ns
+
+t.test(dpfreq_tot ~ parent_college, data=alldata) # ns
+t.test(dpfreq_tot ~ parent_graddeg, data=alldata) # ns
+t.test(dpfreq_tot ~ language_notEnglish, data=alldata) # ns 
+t.test(dpfreq_tot ~ parent_race_bi, data=alldata) # POC report less frequent parenting hassles
+
+t.test(income_to_needs ~ parent_college, data=alldata) # sig
+
+# ANOVA with multicategorical variable: NIH race
+summary(aov(r_coi_nat~parent_race_nih, data=alldata)) # sig
+
+race_comp_data <- alldata |> # filter out the race categories that only occur once, so that the t-test can be run
+  dplyr::filter(parent_race_nih != "American Indian/AK Native" & parent_race_nih != "Native Hawaiian/other Pac. Isl.")
+
+pairwise.t.test(race_comp_data$r_coi_nat, race_comp_data$parent_race_nih, p.adj = "BH") # Black parents lower COI than other races
+
+summary(aov(arcsp_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(pcs_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(ibs_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(mspss_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(dpfreq_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(phq_tot~parent_race_nih, data=alldata)) # ns
+summary(aov(gad_tot~parent_race_nih, data=alldata)) #ns
+
+# chi-square tests: education and race
+edu_race_chisq <- chisq.test(race_comp_data$parent_race_nih, race_comp_data$parent_college) # sig
+observed_counts <- edu_race_chisq$observed
+expected_counts <- edu_race_chisq$expected
+
+# Calculate contribution to chi-square statistic
+contributions <- (observed_counts - expected_counts)^2 / expected_counts
+
+# Calculate percentage contributions
+total_chi_square <- edu_race_chisq$statistic
+percentage_contributions <- 100 * contributions / total_chi_square
+
+# Print percentage contributions
+print("Percentage Contributions:")
+print(round(percentage_contributions, 2)) # more Black lower educated than expected
+```
+# Correlations with COI subdomain scores
+```{r}
+subdomains_corr <- alldata |>
+  dplyr::select(income_to_needs, r_ed_nat, r_he_nat, r_se_nat, arcsp_tot, phq_tot, gad_tot, pcs_tot, ibs_tot_re, dpfreq_tot, contains("ql_"), -ql_source)
+
+# correlations between continuous variables
+subdomains_corrplot <- subdomains_corr |> drop_na()
+
+M1_sub = cor(subdomains_corrplot)
+testRes1_sub = cor.mtest(subdomains_corrplot, conf.level = 0.95)
+
+corrplot(M1_sub, p.mat = testRes1_sub$p,
+         sig.level = 0.05, order = 'hclust', addrect = 2, type = "lower") 
+
+corrplot(M1_sub,
+         method="color",
+         type="lower",
+         order="hclust",
+         addrect=2,
+         diag=TRUE,
+         p.mat = testRes1$p,
+         insig = "label_sig",
+         sig.level = .05,
+         pch.cex = 0.8,
+         number.cex=0.6, # change size of numbers in boxes
+         pch.col = "red",
+         tl.col="black",
+         tl.cex=0.6,
+         addCoef.col = "black",
+         tl.pos="lt",
+         cl.pos="r",
+         outline=TRUE)
+
+```
+# Missingness on covariates and outcomes, and LPA variables
+child_age,
+    oldest_child,
+    child_sex,
+    parent_age,
+    parent_sex,
+```{r}
+# outcomes
+alldata %>% dplyr::count(is.na(ql_efs)) # no one missing emotional functioning
+alldata %>% dplyr::count(is.na(arcsp_tot)) # no one missing
+
+# covariates
+alldata %>% dplyr::count(is.na(child_age)) # 1 person missing child age
+alldata %>% dplyr::count(is.na(oldest_child)) # none
+alldata %>% dplyr::count(is.na(child_sex)) # none
+alldata %>% dplyr::count(is.na(parent_age)) # 2 missing parent age
+alldata %>% dplyr::count(is.na(parent_sex)) # none
+
+# based on child dob and date completed baseline form, calculated child age for person missing
+alldata[alldata$study_id == "REACH0178", "child_age"] <- 4.36
+
+# LPA variables
+lpa_vars <- c("parent_college", "fammeal_days", "income_to_needs", "total_hh_pain", "dpfreq_tot", "phq_tot", "gad_tot", "pcs_tot", "mspss_tot", "panaspa", "famresil_total", "ibs_tot_re")
+
+missing_df <- alldata %>%
+  summarise(across(all_of(lpa_vars), ~ sum(is.na(.)))) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "n_missing"
+  )
+```
+
+# Internal consistency
+IBS-SS, MPSS, ARCS, PHQ-2, PCS-SF, GAD-2, daily parenting hassles
+```{r}
+# ibs-sss
+ibs_sss_items <- alldata |> 
+  dplyr::select(ibs1b, ibs1cr, ibs2b, ibs3, ibs4)
+
+ibsss_alpha <- psych::alpha(ibs_sss_items) # alpha = .72
+round(ibsss_alpha$total$std.alpha, digits=2)
+
+# mspss
+mspss_items <- alldata |> 
+  dplyr::select(contains("mspss") & !contains("_"))
+
+mspss_alpha <- psych::alpha(mspss_items) # alpha = .95
+round(mspss_alpha$total$std.alpha, digits=2)
+
+# arcs
+arcs_items <- alldata |> 
+  dplyr::select(contains("arcs") & !contains("_"),
+                -arcs13)
+
+arcs_alpha <- psych::alpha(arcs_items) # alpha = .92
+round(arcs_alpha$total$std.alpha, digits=2)
+
+# phq-2
+phq_items <- alldata |> 
+  dplyr::select(contains("phq") & !contains("_"))
+
+phq_alpha <- psych::alpha(phq_items) # alpha = .86
+round(phq_alpha$total$std.alpha, digits=2)
+
+# gad-2
+gad_items <- alldata |> 
+  dplyr::select(contains("gad") & !contains("_"))
+gad_alpha <- psych::alpha(gad_items) # alpha = .84
+round(gad_alpha$total$std.alpha, digits=2)
+
+# pcs-sf
+pcs_items <- alldata |> 
+  dplyr::select(contains("pcs") & !contains("_"))
+
+pcs_alpha <- psych::alpha(pcs_items) # alpha = .89
+round(pcs_alpha$total$std.alpha, digits=2)
+# daily parenting hassles -- waiting on kristen
+# pdh_int_items <- alldata |> 
+#   dplyr::select()
+
+# panas - pa
+pa_items <- alldata |> 
+  dplyr::select(panas1, panas3, panas5, panas9, panas10, panas12, panas14, panas16, panas17, panas19)
+
+pa_alpha <- psych::alpha(pa_items) 
+round(pa_alpha$total$std.alpha, digits=2)
+
+# daily parenting hassles frequency
+dpfreq_items <- alldata %>% 
+  dplyr::select(contains("dpfreq")  & !contains("_")) %>% 
+  mutate(across(-dpfreq7r, ~case_when(
+    . == "Not applicable" ~ 0,
+    . == "Rarely" ~ 1,
+    . == "Sometimes" ~ 2 ,
+    . == "A lot" ~ 3,
+    . == "Constantly" ~ 4,
+    TRUE ~ NA_real_
+  )))
+
+dpfreq_alpha <- psych::alpha(dpfreq_items %>% dplyr::select(-dpfreq7)) # alpha = .86
+round(dpfreq_alpha$total$std.alpha, digits=2)
+
+# family resilience
+fri_items <- alldata |> 
+  dplyr::select(contains("famresil") & !contains("total"))
+fri_alpha <- psych::alpha(fri_items) 
+round(fri_alpha$total$std.alpha, digits=2)
+
+# pedsql emotional functioning
+pedsql_toddler_items <- alldata |> 
+  dplyr::select(contains("qlpt_ef") & contains("r"))
+
+pedsql_toddler_alpha <- psych::alpha(pedsql_toddler_items) 
+round(pedsql_toddler_alpha$total$std.alpha, digits=2)
+
+pedsql_yc_items <- alldata |> 
+  dplyr::select(contains("qlpyc_ef") & contains("r"))
+
+pedsql_yc_alpha <- psych::alpha(pedsql_yc_items) 
+round(pedsql_yc_alpha$total$std.alpha, digits=2)
+
+# t-test for scores across toddler and yc versions
+alldata %>% dplyr::count(ql_source)
+t.test(ql_efs~ql_source, data=alldata)
+```
+
+# Write out edited df
+```{r}
+# put final df after cleaning steps above into a differnt df 
+alldata_clean <- alldata
+
+date_str <- format(Sys.Date(), "%Y-%m-%d")
+write_csv(alldata_clean, paste0("../analysis_data_", date_str, ".csv"))
+```
+
+# JoP R1 Revisions
+## Add numbers for who was eligible based on dx vs ROME criteria
+```{r}
+# read in eligilbity data
+eligdata <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_eligibility_data_7.13.26.csv") %>% 
+  dplyr::select(
+    record_id,
+    legitdx,
+    romesend___1
+  ) %>% 
+  mutate(
+    study_id = paste0("REACH", str_pad(record_id, width = 4, pad = "0"))) %>% 
+  dplyr::select(-record_id)
+
+# merge with rest of data
+alldata_clean <- alldata_clean %>% 
+  left_join(eligdata, by = "study_id")
+
+# count and percent for how many were eligible based on ROME criteria vs recent dx
+alldata_clean %>% 
+  dplyr::count(romesend___1) %>% 
+  mutate(perc = (n / sum(n))*100)
+```
+
+## Examine duration of parental chronic pain
+```{r}
+dur_test <- alldata_clean %>% 
+  dplyr::mutate(
+    pain_years_before_cbirth = pain_duration - child_age,
+    pain_before_cbirth = ifelse(pain_years_before_cbirth > 0, 1, 0)
+  )
+
+dur_test %>% dplyr::count(pain_before_cbirth) # 38 (18%) didn't have pain, 166 did
+```
+

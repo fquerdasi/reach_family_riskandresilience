@@ -1,0 +1,1646 @@
+---
+title: "reach_family_mixturemodeling_sharing"
+author: "Fran Querdasi"
+date: "2025-12-29"
+output: html_document
+---
+
+# Setup
+
+## Load libraries
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(stringr)
+  library(purrr)
+  library(MplusAutomation)
+  library(rstatix)
+  library(broom)
+  library(effects)
+  library(rstatix)
+  library(multcomp)
+  library(gtsummary)
+  library(gt)
+})
+```
+
+## Load data
+Profile variables:
+- IBS-ss total score
+- depression total
+- anxiety total (gad-2)
+- catastrophizing total
+- positive affect total ()
+- parenting hassles (frequency)
+- social support total
+- family resilience
+- num hh with pain (caregivers, biocaregivers, people who child spends time)
+- eating meals together
+- income to needs
+- parent education (college vs less)
+Outcome variables:
+- parent protective responses
+- child emotional functioning
+Covariates:
+- child age
+- parent age
+- first child
+- child sex
+- parent sex
+```{r}
+mplus <- read_csv("../analysis_data_2026-04-01.csv") %>% 
+  dplyr::select(
+    study_id,
+    # covariates
+    child_age,
+    oldest_child,
+    child_sex,
+    parent_age,
+    parent_sex,
+    # profile vars
+    income_to_needs,
+    total_hh_pain,
+    dpfreq_tot,
+    phq_tot,
+    gad_tot,
+    pcs_tot,
+    mspss_tot,
+    total_ppp,
+    pain_duration,
+    panaspa,
+    parent_college,
+    parent_graddeg,
+    num_caregivers_pain,
+    num_biocare_pain,
+    famresil_total,
+    ibs_tot_re,
+    fammeal_days,
+    # outcome vars
+    arcsp_tot,
+    ql_efs
+  )
+```
+
+
+# Clean data for Mplus
+```{r}
+# id: remove first 5 characters
+mplus_clean <- mplus %>% 
+  mutate(
+    study_id = as.numeric(str_sub(study_id, 6))
+  )
+
+# binarize oldest child, childsex
+mplus_clean <- mplus_clean %>% 
+  mutate(
+    oldest_child = ifelse(oldest_child=="Yes", 1, 0),
+    child_female = ifelse(child_sex == "Female", 1, 0),
+    parent_female = ifelse(parent_sex == "Female", 1, 0)
+  )
+
+# create fammeals categorical var where num is higher with increasing frequency of family meals
+mplus_clean <- mplus_clean %>% 
+  dplyr::select(
+    -child_sex,
+    -parent_sex
+  ) %>% 
+  dplyr::mutate( # collapse into 3 categories since there's only 1% in 0 days cat
+    fammeal_days_cat = case_when(
+      fammeal_days == "0 days" ~ 1,
+      fammeal_days == "1-3 days" ~ 1,
+      fammeal_days == "4-6 days" ~ 2,
+      fammeal_days == "Every day" ~ 3
+    )
+  )
+
+# remove non-categorical fammeals var
+mplus_clean <- mplus_clean %>% 
+  dplyr::select(-fammeal_days)
+
+mean_page <- mean(mplus_clean$parent_age, na.rm=TRUE)
+# mean impute 2 missing parent ages (REACH271 and REACH375)
+mplus_clean[mplus_clean$study_id == "271", "parent_age"] <- mean_page
+mplus_clean[mplus_clean$study_id == "375", "parent_age"] <- mean_page
+
+
+# change NA to -999
+mplus_clean <- mplus_clean %>% 
+  dplyr::mutate(
+    across(everything(), ~ifelse(is.na(.), -999, .))
+  )
+
+
+# standardize continuous indicator variables
+# mplus_clean <- mplus_clean %>% 
+#   dplyr::mutate(across(
+#     c(income_to_needs, total_hh_pain, dpfreq_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, panaspa, famresil_total, ibs_tot_re),
+#     ~ as.numeric(scale(.)),
+#     .names = "{.col}_z"
+#   )
+#   )
+```
+
+# Confirm ranges for all vars are reasonable (cleaning was performed as expected)
+```{r}
+min(mplus$child_age, na.rm=TRUE)
+```
+
+
+# Write dataset for use in mplus
+```{r}
+# grab var names to read back in 
+mplus_clean_var_names <- paste(names(mplus_clean), collapse = " ")
+
+# write output file
+write.table(
+  mplus_clean,
+  "../reach_mplus_final.dat",
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote = FALSE
+)
+
+readLines("../reach_mplus_final.dat", n = 2)
+ncol(mplus_clean)
+```
+
+# Run all the Mplus models
+```{r}
+# runs all files with mplus.inp ending in the current working directoy (those that should be run to evaluate best-fitting profile)
+runModels(filefilter = ".*_mplus\\.inp$", showOutput=TRUE)
+```
+
+
+# Mplus analysis steps
+1. Missing values estimated using FIML in LPA
+2. Iterative model evaluation (1-5 or 6 profiles)
+3. Evaluate models to identify fit and interpretability
+4. Interpret retained model -- examine patterns of the profiles and weights of included variables in each profile 
+5. Covariate analysis
+
+# Step 3: Extract parameters from Mplus models
+aBIC = sample size adjusted BIC
+```{r}
+# read mplus lpa model output into R
+output <- MplusAutomation::readModels("../reach_neighborhood_parentfunctioning/final_lpa_models_forselection/")
+
+# this automatic summary cannot extract entropy, but other values yes (though T11 values are diff from overall LMR p-value)
+# summarize
+# enum_summary <- LatexSummaryTable(output, 
+#                 keepCols=c("Title", 
+#                            "LL", 
+#                            "AIC",
+#                            "BIC",
+#                            "aBIC",
+#                            "BLRT_PValue",
+#                            "T11_VLMR_PValue",
+#                            "T11_LMR_PValue"), 
+#                                    sortBy = "Title")
+# 
+# enum_summary %>% 
+#   gt()
+```
+
+# Step 3: Read in Mplus results and create comparison table of model fit stats to identify best-fitting model
+```{r}
+read_mplus_out <- function(file) {
+  readLines(file, warn = FALSE)
+}
+
+# extract values of interest
+
+# extract lowest log likelihood
+extract_loglik <- function(x) {
+  idx <- which(stringr::str_detect(x, "Final stage loglikelihood values"))
+  
+  if (length(idx) == 0) return(NA_real_)
+  if (idx[1] + 2 > length(x)) return(NA_real_)
+  
+  target_line <- x[idx[1] + 2]
+  
+  as.numeric(stringr::str_extract(target_line, "-?[0-9]+(\\.[0-9]+)?"))
+}
+
+extract_ic <- function(x, label) {
+  as.numeric(
+    stringr::str_match(
+      x[stringr::str_detect(x, label)][1],
+      "(-?[0-9\\.]+)$"
+    )[,2]
+  )
+}
+
+#aic  <- extract_ic(out, "Akaike")
+#bic  <- extract_ic(out, "Bayesian")
+#sabic <- extract_ic(out, "Sample-Size Adjusted")
+
+extract_entropy <- function(x) {
+  ent <- x[stringr::str_detect(x, "Entropy")]
+  if (length(ent) == 0) return(NA_real_)
+  as.numeric(stringr::str_extract(ent[1], "[0-9\\.]+$"))
+}
+
+extract_lmr <- function(x) {
+  lmr <- which(stringr::str_detect(x, "LO-MENDELL-RUBIN ADJUSTED"))
+  
+  if (length(lmr) == 0) return(NA_real_)
+  if (lmr[1] + 3 > length(x)) return(NA_real_)
+  
+  target_line <- x[lmr[1] + 3]
+  
+  as.numeric(stringr::str_extract(target_line, "[0-9\\.]+$"))
+}
+
+extract_blrt <- function(x) {
+  blrt <- which(stringr::str_detect(x, "BOOTSTRAPPED LIKELIHOOD RATIO TEST"))
+  
+  if (length(blrt) == 0) return(NA_real_)
+  if (blrt[1] + 3 > length(x)) return(NA_real_)
+  
+  target_line <- x[blrt[1] + 5]
+  
+  as.numeric(stringr::str_extract(target_line, "[0-9\\.]+$"))
+}
+
+extract_classes <- function(file) {
+  as.integer(stringr::str_extract(basename(file), "\\d+"))
+}
+
+extract_enum_metrics <- function(file) {
+  out <- read_mplus_out(file)
+
+  tibble::tibble(
+    classes = extract_classes(file),
+    min_loglik  = extract_loglik(out),
+    aic     = extract_ic(out, "Akaike"),
+    bic     = extract_ic(out, "Bayesian"),
+    sabic   = extract_ic(out, "Sample-Size Adjusted"),
+    entropy = extract_entropy(out),
+    lmr_p   = extract_lmr(out),
+    blrt_p  = extract_blrt(out)
+  )
+}
+
+out_files <- list.files(
+  path = "../reach_neighborhood_parentfunctioning/final_lpa_models_forselection/",
+  pattern = "\\mplus.out$",
+  full.names = TRUE
+)
+
+reach_enum_table_final <- map_dfr(out_files, extract_enum_metrics) %>%
+  arrange(classes)
+
+reach_enum_table_final_formatted <- reach_enum_table_final
+colnames(reach_enum_table_final_formatted) <- c("Classes", "Min. Log Likelihood", "AIC", "BIC", "SABIC", "Entropy", "LMR p-value", "Boot LMR p-value")
+
+# generate word-compatible APA format table, export
+library(rempsyc)
+table1 <- nice_table(
+  reach_enum_table_final_formatted,
+  title = c("Table 1", "Fit Statistics for Models with 1-5 Subgroups"),
+  note = ""
+)
+
+flextable::save_as_docx(table1, path = "tables/table1.docx")
+```
+
+# Step 4: Evaluate patterns of profiles
+
+When SAVE=CPROBABILITIES is used in conjunction with
+TYPE=MIXTURE in the ANALYSIS command, individual posterior
+probabilities for each latent class are saved along with the other analysis
+variables. In addition, a variable is saved that contains the most likely
+class membership, that is, the class with the highest posterior probability
+for each individual.
+Last 4 columns are: posterior class probabilities (class 1 -x) and then last column: most likely class
+
+## Extract estimated means for each class for profiles plot: 3-profile solution
+From: https://garberadamc.github.io/project-site/mlca-replication
+```{r}
+# extract class probabilities
+#dat <- read_table("LPA4.dat")
+dat3 <- readr::read_table("LPA3_final.dat", 
+                         col_names = c("parent_college", "fammeal_days_cat", "income_to_needs", "total_hh_pain", "dpfreq_tot", "phq_tot", "gad_tot", "pcs_tot", "mspss_tot", "panaspa", "famresil_total", "ibs_tot_re", "class1_prob", "class2_prob", "class3_prob", "class_assign", "study_id"))
+
+lpa3_classprob <- dat3 %>% 
+  dplyr::select(study_id, contains("class")) %>% 
+  left_join(mplus_clean, by = "study_id")
+
+lpa3_classprob %>%
+  dplyr::select(-class_assign) %>% 
+  pivot_longer(starts_with("class"),
+               names_to = "class",
+               values_to = "prob") %>%
+  ggplot(aes(x = class, y = prob)) +
+  geom_violin()
+
+lpa3_classprob %>% dplyr::count(class_assign)
+
+# extract model-estimated means
+lpa3profile_means <- output$reach_3profile_mplus.out$parameters$unstandardized %>% 
+  filter(paramHeader== "Means") %>% 
+  filter(LatentClass != "Categorical.Latent.Variables") %>% 
+  dplyr::select(
+    class = LatentClass,
+    indicator=param,
+    mean_model=est
+  ) %>%  # rename indicators back to full var names
+  mutate(
+    indicator=case_when(
+      indicator=="INCOME_TO_" ~ "income_to_needs",
+      indicator=="TOTAL_HH_P" ~ "total_hh_pain",
+      indicator=="DPFREQ_TOT" ~ "dpfreq_tot",
+      indicator=="PHQ_TOT" ~ "phq_tot",
+      indicator=="GAD_TOT" ~ "gad_tot",
+      indicator=="PCS_TOT" ~ "pcs_tot",
+      indicator=="MSPSS_TOT" ~ "mspss_tot",
+      indicator=="PANASPA" ~ "panaspa",
+      indicator=="FAMRESIL_T" ~ "famresil_total",
+      indicator=="IBS_TOT_RE" ~ "ibs_tot_re"
+    )
+  )
+
+# standardize the means for plotting
+# compute reference means and SD from the raw data
+ref_stats_3profiles <- mplus_clean %>%
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  summarise(across(
+    c(income_to_needs, total_hh_pain, dpfreq_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, panaspa, famresil_total, ibs_tot_re),
+    list(mean = ~ mean(.x, na.rm = TRUE),
+         sd   = ~ sd(.x, na.rm = TRUE))
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("indicator", ".value"),
+    names_pattern = "^(.*)_(mean|sd)$"
+  ) %>% 
+  rename(mean_data = mean,
+         sd_data = sd)
+
+# standardize the estimated means
+plot_means_3profiles <- lpa3profile_means %>%
+  left_join(ref_stats_3profiles, by = "indicator") %>%
+  mutate(z_mean = (mean_model - mean_data) / sd_data)
+
+# extract model estimated class sizes
+c_size <- output$reach_3profile_mplus.out$class_counts$mostLikely
+
+plot_means_3profiles <- plot_means_3profiles %>%
+  mutate(class=as.numeric(class)) %>% 
+  left_join(c_size, by = "class") 
+
+plot_means_3profiles <- plot_means_3profiles %>% 
+  mutate(pct = proportion*100)
+
+class_labels_3pofiles <- plot_means_3profiles %>%
+  distinct(class, pct) %>%          # one row per class
+  arrange(class) %>%
+  mutate(
+    label = paste0(
+      "Group ", class, " (", round(pct, 1), "%)"
+    )
+  )
+
+label_vec_3profiles <- setNames(class_labels_3pofiles$label, class_labels_3pofiles$class)
+
+plot_means_3profiles$indicator <- factor(
+  plot_means_3profiles$indicator,
+  levels = c("income_to_needs", "dpfreq_tot", "gad_tot", "phq_tot", "pcs_tot", "ibs_tot_re", "panaspa", "mspss_tot", "famresil_total", "total_hh_pain"),
+  labels = c("Income-to-Needs", "Parenting Stress", "Anxiety", "Depression", "Catastrophizing", "IBS Symptoms", "Positive Affect", "Social Support", "Family Resilience", "Fam. Mem. w/Pain")
+)
+
+# paper figure version
+ggplot(plot_means_3profiles, aes(indicator, z_mean, shape = as.factor(class), 
+                    colour = as.factor(class), group=class, lty = as.factor(class))) +
+  geom_point(size = 3) + geom_line() + 
+  #scale_x_continuous("", breaks = 1:10) + 
+  scale_y_continuous("Mean (standardized)") + 
+  scale_colour_grey(
+    labels = label_vec_3profiles
+  ) +
+  scale_shape_discrete(
+    labels = label_vec_3profiles
+  ) +
+  scale_linetype_discrete(
+    labels = label_vec_3profiles
+  ) +
+  xlab(NULL) +
+  #theme_cowplot() +
+  theme(text=element_text(family="Times New Roman", size=10),
+        legend.key.width = unit(.5, "line"),
+        legend.text = element_text(family="Times New Roman", size=10),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.border = element_rect(
+                           color = "black",  
+                           size = 0.5),
+        panel.background = element_rect(fill = "white"),
+        plot.background  = element_rect(fill = "white", color = NA),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("tables/figure1_pres.png", dpi=1000, width=6, height=4)
+
+# grand rounds presentation version
+ggplot(plot_means_3profiles, aes(indicator, z_mean, shape = as.factor(class), 
+                    colour = as.factor(class), group=class, alpha=as.factor(class))) +
+  geom_point(size = 3) + geom_line() + 
+  #scale_x_continuous("", breaks = 1:10) + 
+  scale_y_continuous("Mean (standardized)") + 
+  scale_colour_manual(
+    values = c("darkgreen", "red", "orange"),
+  labels = label_vec_3profiles
+  ) +
+  scale_shape_discrete(
+    labels = label_vec_3profiles
+  ) +
+  scale_alpha_manual(
+    values = c(0.4, 0.4, 1),  # third profile is fainter
+    labels = label_vec_3profiles
+  ) +
+  guides(alpha = "none") +
+  xlab(NULL) +
+  #theme_cowplot() +
+  theme(text=element_text(family="Times New Roman", size=10),
+        legend.key.width = unit(.5, "line"),
+        legend.text = element_text(family="Times New Roman", size=10),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.border = element_rect(
+                           color = "black",  
+                           size = 0.5),
+        panel.background = element_rect(fill = "white"),
+        plot.background  = element_rect(fill = "white", color = NA),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("tables/figure1_pres3.png", dpi=1000, width=6, height=4)
+```
+
+## Extract estimated means for each class for profiles plot: 4-profile solution
+```{r}
+# extract model-estimated means
+lpa4profile_means <- output$reach_4profile_mplus.out$parameters$unstandardized %>% 
+  filter(paramHeader== "Means") %>% 
+  filter(LatentClass != "Categorical.Latent.Variables") %>% 
+  dplyr::select(
+    class = LatentClass,
+    indicator=param,
+    mean_model=est
+  ) %>%  # rename indicators back to full var names
+  mutate(
+    indicator=case_when(
+      indicator=="INCOME_TO_" ~ "income_to_needs",
+      indicator=="TOTAL_HH_P" ~ "total_hh_pain",
+      indicator=="DPFREQ_TOT" ~ "dpfreq_tot",
+      indicator=="PHQ_TOT" ~ "phq_tot",
+      indicator=="GAD_TOT" ~ "gad_tot",
+      indicator=="PCS_TOT" ~ "pcs_tot",
+      indicator=="MSPSS_TOT" ~ "mspss_tot",
+      indicator=="PANASPA" ~ "panaspa",
+      indicator=="FAMRESIL_T" ~ "famresil_total",
+      indicator=="IBS_TOT_RE" ~ "ibs_tot_re"
+    )
+  )
+
+# standardize the estimated means
+plot_means_4profiles <- lpa4profile_means %>%
+  left_join(ref_stats, by = "indicator") %>%
+  mutate(z_mean = (mean_model - mean_data) / sd_data)
+
+# extract model estimated class sizes
+c_size <- output$reach_4profile_mplus.out$class_counts$modelEstimated
+
+plot_means_4profiles <- plot_means_4profiles %>%
+  mutate(class=as.numeric(class)) %>% 
+  left_join(c_size, by = "class") %>% 
+  mutate(pct = proportion*100)
+
+class_labels_4profiles <- plot_means_4profiles %>%
+  distinct(class, pct) %>%          # one row per class
+  arrange(class) %>%
+  mutate(
+    label = paste0(
+      "Group ", class, " (", round(pct, 1), "%)"
+    )
+  )
+
+# set label for classes in legend
+label_vec_4profiles <- setNames(class_labels_4profiles$label, class_labels_4profiles$class)
+
+# set order of the variables being displayed on plot (same as in manuscript)
+plot_means_4profiles$indicator <- factor(
+  plot_means_4profiles$indicator,
+  levels = c("income_to_needs", "pcs_tot", "gad_tot", "phq_tot", "panaspa", "mspss_tot", "famresil_total", "ibs_tot_re", "total_hh_pain", "dpfreq_tot"),
+  labels = c("Income-to-Needs", "Catastrophizing", "Anxiety", "Depression", "Positive Affect", "Social Support", "Family Resilience", "IBS Symptoms", "Fam. Mem. w/Pain", "Parenting Stress")
+)
+
+ggplot(plot_means_4profiles, aes(indicator, z_mean, shape = as.factor(class), 
+                    colour = as.factor(class), group=class, lty = as.factor(class))) +
+  geom_point(size = 3) + geom_line() + 
+  #scale_x_continuous("", breaks = 1:10) + 
+  scale_y_continuous("Mean (standardized)") + 
+  scale_colour_grey(
+    labels = label_vec_4profiles
+  ) +
+  scale_shape_discrete(
+    labels = label_vec_4profiles
+  ) +
+  scale_linetype_discrete(
+    labels = label_vec_4profiles
+  ) +
+  xlab(NULL) +
+  #theme_cowplot() +
+  theme(text=element_text(family="Times New Roman", size=10),
+        legend.key.width = unit(.5, "line"),
+        legend.text = element_text(family="Times New Roman", size=10),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.border = element_rect(
+                           color = "black",  
+                           size = 0.5),
+        panel.background = element_rect(fill = "white"),
+        plot.background  = element_rect(fill = "white", color = NA),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("tables/figure1.png", dpi=1000, width=6, height=4)
+```
+
+### Same but 5-profile solution
+```{r}
+# extract model-estimated means
+lpa5profile_means <- output$reach_5profile_mplus.out$parameters$unstandardized %>% 
+  filter(paramHeader== "Means") %>% 
+  filter(LatentClass != "Categorical.Latent.Variables") %>% 
+  select(
+    class = LatentClass,
+    indicator=param,
+    mean_model=est
+  ) %>%  # rename indicators back to full var names
+  mutate(
+    indicator=case_when(
+      indicator=="INCOME_TO_" ~ "income_to_needs",
+      indicator=="TOTAL_HH_P" ~ "total_hh_pain",
+      indicator=="DPFREQ_TOT" ~ "dpfreq_tot",
+      indicator=="PHQ_TOT" ~ "phq_tot",
+      indicator=="GAD_TOT" ~ "gad_tot",
+      indicator=="PCS_TOT" ~ "pcs_tot",
+      indicator=="MSPSS_TOT" ~ "mspss_tot",
+      indicator=="PANASPA" ~ "panaspa",
+      indicator=="FAMRESIL_T" ~ "famresil_total",
+      indicator=="IBS_TOT_RE" ~ "ibs_tot_re"
+    )
+  )
+
+# standardize the estimated means
+plot_means_5profiles <- lpa5profile_means %>%
+  left_join(ref_stats, by = "indicator") %>%
+  mutate(z_mean = (mean_model - mean_data) / sd_data)
+
+# extract model estimated class sizes
+c_size <- output$reach_5profile_mplus.out$class_counts$modelEstimated
+
+plot_means_5profiles <- plot_means_5profiles %>%
+  mutate(class=as.numeric(class)) %>% 
+  left_join(c_size, by = "class") %>% 
+  mutate(pct = proportion*100)
+
+class_labels_5profiles <- plot_means_5profiles %>%
+  distinct(class, pct) %>%          # one row per class
+  arrange(class) %>%
+  mutate(
+    label = paste0(
+      "Class ", class, " (", round(pct, 1), "%)"
+    )
+  )
+
+label_vec_5profiles <- setNames(class_labels_5profiles$label, class_labels_5profiles$class)
+
+ggplot(plot_means_5profiles, aes(indicator, z_mean, shape = as.factor(class), 
+                    colour = as.factor(class), group=class, lty = as.factor(class))) +
+  geom_point(size = 4) + geom_line() + 
+  #scale_x_continuous("", breaks = 1:10) + 
+  scale_y_continuous("Mean") + 
+  scale_colour_grey(
+    labels = label_vec_5profiles
+  ) +
+  scale_shape_discrete(
+    labels = label_vec_5profiles
+  ) +
+  scale_linetype_discrete(
+    labels = label_vec_5profiles
+  ) +
+  #theme_cowplot() +
+  theme(text=element_text(family="Times New Roman", size=12),
+        legend.key.width = unit(.5, "line"),
+        legend.text = element_text(family="Times New Roman", size=12),
+        legend.title = element_blank(), 
+        legend.position = "top")
+```
+
+### Step 4 Covariate Analysis: Try BCH 3-step approach
+Most computationally complex, but simulation studies suggest its more robust than ANCOVA
+Over ANCOVA, this method is recommend because it allows for the uncertainty of the profile assignment to remain in the model while also maintaining integrity of profiles with covariates added
+From Mplus user manual: https://www.statmodel.com/examples/webnotes/webnote21.pdf
+
+```{r}
+# read the appropriate section of the output into results table in R
+outcomes_3profile <- readModels("reach_3profile_mplus_covs_bch_step3.out")
+
+# extract parameters
+outcomes_3profile_regression <- outcomes_3profile$regression %>% 
+  dplyr::select(lhs, rhs, est, se, pval, stdyx)
+```
+
+# Outcomes analysis with covariates: 3-profile solution
+reach_3profile_mplus_covs_bch_step3_statmodel_covs_final.out:
+- Emotional functioning: Overall chi-square significant
+  - significant difference class 1 vs 2 (class 2 lower)
+  - significant difference class 1 vs 3 (class 3 lower)
+  - n.s. class 2 vs 3
+- Parent protectiveness: chi-square n.s.
+  - marginal difference class 1 vs 3, all others n.s.
+- covariate differences across classes: n.s.
+```{r}
+# extract parameters from covariate analysis
+# read mplus lpa model output into R
+output_outcomes_3profile <- readModels("../reach_neighborhood_parentfunctioning/reach_3profile_mplus_covs_bch_step3_statmodel_covs_final.out")
+
+# this automatic summary cannot extract entropy, but other values yes (though T11 values are diff from overall LMR p-value)
+# Pull the full text output
+raw_text <- output_outcomes_3profile$rawOutput
+
+# Locate the section
+start_line <- str_which(raw_text, "EQUALITY TEST OF MEANS ACROSS THE LATENT CLASSES")
+end_line   <- str_which(raw_text, "TECH")  # or another heading that follows
+
+# Subset lines for that section
+equality_section <- raw_text[start_line:(end_line - 1)]
+
+cat(equality_section, sep = "\n")
+```
+  
+# Outcomes analysis with covariates: 4-profile solution
+reach_4profile_mplus_covs_bch_step3_statmodel_covs.out:
+- covariate differences across the classes
+  - parent age, c1 is higher than c4? 
+- emotional functioning: overall chi-square significant
+  - class 1 vs class 2 significant difference (class 2 lower)
+  - class 2 vs class 3 significant difference (class 2 lower)
+  - class 2 vs class 4 significant difference (class 2 lower)
+- parent protectiveness: overall chi-square n.s.
+  - class 3 vs class 4 significant difference (class 4 higher)
+
+# Code to convert 'thresholds' to probabilities
+Mplus parameterizes binary indicators with thresholds on a latent response scale.
+prob <- function(x) 1 / (1 + exp(-(-x)))
+```{r}
+prob <- function(x) 1 / (1 + exp(-(-x)))
+
+prob(1.49) # class 1 college prob = .18
+prob(-15) # class 2 college prob = .99
+prob (-1.76) # class 3 college prob = .85
+prob(1.29) # class 4 college prob = .22
+```
+
+# Breakdowns by Class
+## Means and SDs for Indicator Varialbes
+```{r}
+ind_vars <- lpa3_classprob %>% 
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  tbl_summary(
+    by = class_assign,
+    include = c(child_age, oldest_child, parent_age, income_to_needs, total_hh_pain, dpfreq_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, total_ppp, pain_duration, panaspa, parent_college, famresil_total, ibs_tot_re, child_female, fammeal_days_cat),
+    type = list(child_age ~ "continuous", phq_tot ~ "continuous", gad_tot ~ "continuous", total_ppp ~ "continuous", total_hh_pain ~ "continuous"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"))
+
+indvars_by_class <- as_gt(ind_vars) 
+gtsave(indvars_by_class, filename = "tables/ind_by_class.docx")
+```
+
+## Means and SDs for Early Vulnerability Markers
+```{r}
+outcome_vars <- lpa3_classprob %>% 
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  tbl_summary(
+    by = class_assign,
+    include = c(arcsp_tot, ql_efs),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"))
+
+outcomes_by_class <- as_gt(outcome_vars) 
+gtsave(outcomes_by_class, filename = "tables/outcomes_by_class.docx")
+```
+
+## Demographics
+Need to read into dataset: parent relation to child, parent race, parent ethnicity, employment status, marital status, pain duration, child race, child eth, child outside care
+```{r}
+lpa3_classprob_demos <- lpa3_classprob %>% 
+  mutate(study_id = sprintf("REACH%04d", study_id))
+
+# read in demos 
+lpa3_classprob_demos <- lpa3_classprob_demos %>% 
+  left_join(alldata %>% dplyr::select(
+    study_id,
+    relationchild,
+    parent_race_nih, 
+    parent_eth,
+    parent_sex,
+    pgender,
+    child_sex,
+    child_eth,
+    child_race_nih,
+    parent_work,
+    notwork_reason,
+    relationstatus,
+    child_outsidecare
+  ), by = "study_id")
+
+demo_vars_class <- lpa3_classprob_demos %>% 
+  tbl_summary(
+    by = class_assign,
+    include = c(
+    relationchild,
+    parent_sex,
+    pgender,
+    parent_race_nih, 
+    parent_eth,
+    child_sex,
+    child_eth,
+    child_race_nih,
+    parent_work,
+    notwork_reason,
+    relationstatus,
+    pain_duration,
+    child_outsidecare),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"))
+
+demos_by_class <- as_gt(demo_vars_class) 
+gtsave(demos_by_class, filename = "tables/demos_by_class.docx")
+```
+
+## Class comparisons
+```{r}
+# anova and lsd for continuous variables
+model <- aov(total_ppp ~ class_assign, data = lpa3_classprob_demos)
+summary(model)
+out<- LSD.test(model, "class_assign", p.adj = "bonferroni")
+
+# run anovas for all continuous demo vars
+contdemovars <- c("parent_age", "total_ppp", "pain_duration", "child_age")
+anova_results <- map_dfr(
+  contdemovars,
+  ~ aov(reformulate("class_assign", response = .x), data = lpa3_classprob_demos) %>%
+      tidy() %>%
+      mutate(outcome = .x)
+)
+
+# chi-square for counts for categorical variables
+# uses Fisher's exact test for cases with sparse categories (and simulated p-value)
+catdemovars <- c("relationchild", "parent_sex", "pgender", "parent_race_nih", "parent_eth", "child_sex", "child_eth", "child_race_nih", "parent_work", "notwork_reason", "relationstatus", "oldest_child", "child_outsidecare")
+
+chisq_results <- map_dfr(catdemovars, function(v) {
+
+  tab <- table(lpa3_classprob_demos$class_assign, lpa3_classprob_demos[[v]])
+
+  chisq_obj <- suppressWarnings(chisq.test(tab))
+
+  if(any(chisq_obj$expected < 5)) {
+
+    test <- fisher.test(
+      tab,
+      simulate.p.value = TRUE,
+      B = 10000
+    )
+
+    method <- "fisher_simulated"
+
+  } else {
+
+    test <- chisq_obj
+    method <- "chisq"
+  }
+
+  broom::tidy(test) %>%
+    mutate(
+      variable = v,
+      method_used = method
+    )
+})
+
+# pairwise follow-up tests
+# relation status
+chisq.test(
+  table(lpa3_classprob_demos$relationstatus,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+# stdres > |2| -- sig diff
+# stdres > 0 -- count higher than expected
+# stdres < 0 -- count lower than expected
+
+# not working
+chisq.test(
+  table(lpa3_classprob_demos$notwork_reason,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# parent race
+chisq.test(
+  table(lpa3_classprob_demos$parent_race_nih,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# parent ethnicity
+chisq.test(
+  table(lpa3_classprob_demos$parent_eth,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# relation to child
+chisq.test(
+  table(lpa3_classprob_demos$relationchild,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# parent sex
+chisq.test(
+  table(lpa3_classprob_demos$parent_sex,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# parent gender
+chisq.test(
+  table(lpa3_classprob_demos$pgender,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# child race
+chisq.test(
+  table(lpa3_classprob_demos$child_race_nih,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# child eth
+chisq.test(
+  table(lpa3_classprob_demos$child_eth,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# child birth order
+chisq.test(
+  table(lpa3_classprob_demos$oldest_child,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+
+# child outside care
+chisq.test(
+  table(lpa3_classprob_demos$child_outsidecare,
+        lpa3_classprob_demos$class_assign)
+)$stdres
+```
+## Compare parental functioning to other clinical samples
+```{r}
+# percent above screening cutoff for depression
+lpa3_classprob_demos %>% dplyr::count(gad_tot > 2) # 57 / 212 = 27%
+lpa3_classprob_demos %>% dplyr::count(phq_tot > 2) # 35 / 212 = 16% 
+```
+
+# Power
+## Percent missing data
+```{r}
+# number of people out of 212 that are missing at least one indicator value
+indicators <- mplus_clean %>% 
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  dplyr::select(
+    income_to_needs,
+    total_hh_pain,
+    dpfreq_tot,
+    phq_tot,
+    gad_tot,
+    pcs_tot,
+    mspss_tot,
+    panaspa,
+    parent_college,
+    famresil_total,
+    ibs_tot_re,
+    fammeal_days_cat
+  )
+
+indicators_complete <- indicators %>% 
+  drop_na()
+```
+6 out of 212 are missing at least one = 3%
+
+# Revisions in response to R1 at JoP
+## Effect size of mean separation between classes
+cohen's d = 0.8 (large effect)
+cohen's d = 0.5 (medium effect)
+cohen's d = 0.2 (small effect)
+Convert SEs from Mplus to SD: SE * sqrt(group N)
+Pooled standard deviation: sqrt[(n1-1)*s1^2 + (n2-1)*s2^2/(n1+n2-2)]
+```{r}
+
+# continuous variables: mean difference / (pooled sd)
+
+model_results_3profile <- readxl::read_xlsx("final_bch_cov_analysis/mplus_output_3profile_groupdiffs.xlsx")
+
+library(dplyr)
+
+#---------------------------------------
+# Function to calculate pooled SD and d
+#---------------------------------------
+calc_d <- function(n1, mean1, se1,
+                   n2, mean2, se2){
+
+  sd1 <- se1 * sqrt(n1)
+  sd2 <- se2 * sqrt(n2)
+
+  pooled_sd <- sqrt(
+    (((n1 - 1) * sd1^2) +
+       (n2 - 1) * sd2^2) /
+      (n1 + n2 - 2)
+  )
+
+  d <- (mean1 - mean2) / pooled_sd
+
+  c(sd1 = sd1,
+    sd2 = sd2,
+    pooled_sd = pooled_sd,
+    d = d)
+}
+
+#---------------------------------------
+# Calculate effect sizes for every row
+#---------------------------------------
+
+effect_sizes <-
+  model_results_3profile %>%
+  rowwise() %>%
+  mutate(
+
+    ## Group 1 vs Group 2
+    g1_g2 = list(calc_d(g1_n, g1_mean, g1_se,
+                        g2_n, g2_mean, g2_se)),
+
+    ## Group 1 vs Group 3
+    g1_g3 = list(calc_d(g1_n, g1_mean, g1_se,
+                        g3_n, g3_mean, g3_se)),
+
+    ## Group 2 vs Group 3
+    g2_g3 = list(calc_d(g2_n, g2_mean, g2_se,
+                        g3_n, g3_mean, g3_se))
+  ) %>%
+  mutate(
+
+    d_g1_g2 = g1_g2["d"],
+    d_g1_g3 = g1_g3["d"],
+    d_g2_g3 = g2_g3["d"],
+
+    pooledsd_g1_g2 = g1_g2["pooled_sd"],
+    pooledsd_g1_g3 = g1_g3["pooled_sd"],
+    pooledsd_g2_g3 = g2_g3["pooled_sd"]
+
+  ) %>%
+  select(-g1_g2, -g1_g3, -g2_g3) %>%
+  ungroup()
+
+# binary variables: cox transformation on odds ratio
+prop_to_d <- function(p1, p2){
+
+  OR <- (p2/(1-p2)) / (p1/(1-p1))
+  log(OR) * sqrt(3) / pi
+}
+
+# group 1 vs group 2 education
+prop_to_d(0.17, 0.99) 
+
+# group 1 vs group 3 education
+prop_to_d(0.17, 0.03) 
+
+# group 2 vs group 3 education
+prop_to_d(0.03, 0.99) 
+
+# multicategorical variable (family meal frequency): cramer's v
+lpa3_classprob_g12 <- lpa3_classprob %>% dplyr::filter(class_assign != 3)
+lpa3_classprob_g13 <- lpa3_classprob %>% dplyr::filter(class_assign != 2)
+lpa3_classprob_g23 <- lpa3_classprob %>% dplyr::filter(class_assign != 1)
+
+rstatix::cramer_v(lpa3_classprob_g12$class_assign, lpa3_classprob_g12$fammeal_days_cat) # 0.08
+rstatix::cramer_v(lpa3_classprob_g13$class_assign, lpa3_classprob_g13$fammeal_days_cat) # 0.13
+rstatix::cramer_v(lpa3_classprob_g23$class_assign, lpa3_classprob_g23$fammeal_days_cat) # 0.06
+```
+
+## 95% CI for difference in proportions between classes for multicategorical variable
+```{r}
+# class 1 v class 2 (0-3 diff)
+p1 <- 0.16
+p2 <- 0.22
+n1 <- 117
+n2 <- 27
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 v class 2 (4-6 diff)
+p1 <- 0.28
+p2 <- 0.26
+n1 <- 117
+n2 <- 27
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 v class 2 (7 diff)
+p1 <- 0.65
+p2 <- 0.52
+n1 <- 117
+n2 <- 27
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 vs class 3 (0-3 diff)
+p1 <- 0.16
+p2 <- 0.24
+n1 <- 117
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 vs class 3 (4-6 diff)
+p1 <- 0.28
+p2 <- 0.31
+n1 <- 117
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 vs class 3 (7 diff)
+p1 <- 0.65
+p2 <- 0.46
+n1 <- 117
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 2 vs class 3 (0-3 diff)
+p1 <- 0.22
+p2 <- 0.24
+n1 <- 27
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 vs class 3 (4-6 diff)
+p1 <- 0.26
+p2 <- 0.31
+n1 <- 27
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+
+# class 1 vs class 3 (7 diff)
+p1 <- 0.52
+p2 <- 0.46
+n1 <- 27
+n2 <- 68
+
+se <- sqrt(
+  p1 * (1 - p1) / n1 +
+  p2 * (1 - p2) / n2
+)
+
+diff <- p1 - p2
+
+lower <- diff - 1.96 * se
+upper <- diff + 1.96 * se
+```
+
+## Add error bars to indicator means graph
+```{r}
+# extract standard erorrs
+lpa3profile_se <- output$reach_3profile_mplus.out$parameters$unstandardized %>% 
+  filter(paramHeader== "Means") %>% 
+  filter(LatentClass != "Categorical.Latent.Variables") %>% 
+  dplyr::select(
+    class = LatentClass,
+    indicator=param,
+    se_model=se
+  ) %>%  # rename indicators back to full var names
+  mutate(
+    indicator=case_when(
+      indicator=="INCOME_TO_" ~ "income_to_needs",
+      indicator=="TOTAL_HH_P" ~ "total_hh_pain",
+      indicator=="DPFREQ_TOT" ~ "dpfreq_tot",
+      indicator=="PHQ_TOT" ~ "phq_tot",
+      indicator=="GAD_TOT" ~ "gad_tot",
+      indicator=="PCS_TOT" ~ "pcs_tot",
+      indicator=="MSPSS_TOT" ~ "mspss_tot",
+      indicator=="PANASPA" ~ "panaspa",
+      indicator=="FAMRESIL_T" ~ "famresil_total",
+      indicator=="IBS_TOT_RE" ~ "ibs_tot_re"
+    )
+  )
+
+# code from graph in original manuscript -- reproduced below
+
+# standardize the means for plotting
+# compute reference means and SD from the raw data
+ref_stats_3profiles <- mplus_clean %>%
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  summarise(across(
+    c(income_to_needs, total_hh_pain, dpfreq_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, panaspa, famresil_total, ibs_tot_re),
+    list(mean = ~ mean(.x, na.rm = TRUE),
+         sd   = ~ sd(.x, na.rm = TRUE))
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("indicator", ".value"),
+    names_pattern = "^(.*)_(mean|sd)$"
+  ) %>% 
+  rename(mean_data = mean,
+         sd_data = sd)
+
+# standardize the estimated means
+# NEW: add sds to SE dataframe
+# standardize the SEs by dividing by the SD
+plot_3profiles <- lpa3profile_means %>%
+  left_join(ref_stats_3profiles, by = "indicator") %>%
+  mutate(z_mean = (mean_model - mean_data) / sd_data) %>% 
+  left_join(lpa3profile_se, by = c("class", "indicator")) %>%
+  mutate(z_se = (se_model) / sd_data,
+         z_upper = z_mean + z_se,
+         z_lower = z_mean - z_se)  
+
+
+
+# extract model estimated class sizes
+c_size <- output$reach_3profile_mplus.out$class_counts$mostLikely
+
+plot_3profiles <- plot_3profiles %>%
+  mutate(class=as.numeric(class)) %>% 
+  left_join(c_size, by = "class") 
+
+plot_3profiles <- plot_3profiles %>% 
+  mutate(pct = proportion*100)
+
+class_labels_3pofiles <- plot_3profiles %>%
+  distinct(class, pct) %>%          # one row per class
+  arrange(class) %>%
+  mutate(
+    label = paste0(
+      "Group ", class, " (", round(pct, 1), "%)"
+    )
+  )
+
+label_vec_3profiles <- setNames(class_labels_3pofiles$label, class_labels_3pofiles$class)
+
+plot_3profiles$indicator <- factor(
+  plot_3profiles$indicator,
+  levels = c("income_to_needs", "dpfreq_tot", "gad_tot", "phq_tot", "pcs_tot", "ibs_tot_re", "panaspa", "mspss_tot", "famresil_total", "total_hh_pain"),
+  labels = c("Income-to-Needs", "Parenting Stress", "Anxiety", "Depression", "Catastrophizing", "IBS Symptoms", "Positive Affect", "Social Support", "Family Resilience", "Fam. Mem. w/Pain")
+)
+
+# paper figure version
+ggplot(plot_3profiles, aes(indicator, z_mean, shape = as.factor(class), 
+                    colour = as.factor(class), group=class, lty = as.factor(class))) +
+  geom_errorbar(
+    aes(ymin = z_lower, ymax = z_upper),
+    width = 0.15,
+    linewidth = 0.4
+  ) +
+  geom_point(size = 3) + geom_line() + 
+  #scale_x_continuous("", breaks = 1:10) + 
+  scale_y_continuous("Mean (standardized)") + 
+  scale_colour_grey(
+    labels = label_vec_3profiles
+  ) +
+  scale_shape_discrete(
+    labels = label_vec_3profiles
+  ) +
+  scale_linetype_discrete(
+    labels = label_vec_3profiles
+  ) +
+  xlab(NULL) +
+  #theme_cowplot() +
+  theme(text=element_text(family="Times New Roman", size=10),
+        legend.key.width = unit(.5, "line"),
+        legend.text = element_text(family="Times New Roman", size=10),
+        legend.title = element_blank(), 
+        legend.position = "top", 
+        panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.border = element_rect(
+                           color = "black",  
+                           size = 0.5),
+        panel.background = element_rect(fill = "white"),
+        plot.background  = element_rect(fill = "white", color = NA),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("tables/figure1_r1.jpg", dpi=1000, width=6, height=4)
+```
+
+# Breakdowns by Class -- 2 Group Solution
+## Means and SDs for Indicator Varialbes
+```{r}
+dat2 <- readr::read_table("LPA2_final.dat", 
+                         col_names = c("parent_college", "fammeal_days_cat", "income_to_needs", "total_hh_pain", "dpfreq_tot", "phq_tot", "gad_tot", "pcs_tot", "mspss_tot", "panaspa", "famresil_total", "ibs_tot_re", "class1_prob", "class2_prob", "class_assign", "study_id"))
+
+lpa2_classprob <- dat2 %>% 
+  dplyr::select(study_id, contains("class")) %>% 
+  left_join(mplus_clean, by = "study_id")
+
+
+ind_vars_2class <- lpa2_classprob %>% 
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  tbl_summary(
+    by = class_assign,
+    include = c(child_age, oldest_child, parent_age, income_to_needs, total_hh_pain, dpfreq_tot, phq_tot, gad_tot, pcs_tot, mspss_tot, total_ppp, pain_duration, panaspa, parent_college, famresil_total, ibs_tot_re, child_female, fammeal_days_cat),
+    type = list(child_age ~ "continuous", phq_tot ~ "continuous", gad_tot ~ "continuous", total_ppp ~ "continuous", total_hh_pain ~ "continuous"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"))
+
+indvars_by_class_2class <- as_gt(ind_vars_2class) 
+gtsave(indvars_by_class_2class, filename = "tables/ind_by_class_2class.docx")
+```
+
+## Means and SDs for Early Vulnerability Markers
+```{r}
+outcome_vars_2class <- lpa2_classprob %>% 
+  mutate(across(everything(), ~na_if(., -999))) %>% 
+  tbl_summary(
+    by = class_assign,
+    include = c(arcsp_tot, ql_efs),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}); Range: {min} - {max}"))
+
+outcomes_by_class_2class <- as_gt(outcome_vars_2class) 
+gtsave(outcomes_by_class_2class, filename = "tables/outcomes_by_class_2class.docx")
+```
+
+# Abdominal symptom analysis
+```{r}
+# IBS-SS mean, sd, range (ibs_tot_re), categories (ibs_cat_re)
+
+
+# other abdominal pain symptom question (mh8; 1 = yes, 0 = no)
+# asked kristen to add 8.5.26
+abpain_add <- new <- read_csv("../../REACH Baseline Data Cleaning/Data/REACH_Abstract_Values_8-5-2026.csv") %>% 
+  dplyr::select(
+    study_id,
+    other_gi_sx = mh8,
+    bloat_sev = ibs2br,
+    bowel_habit_sat = ibs3
+  )
+
+# abdominal pain or ibs question (pp_abpain)
+
+
+# duration abdominal pain (dur_abpain)
+mean(alldata_clean$dur_abpain, na.rm=TRUE) # mean 25.5 years
+sd(alldata_clean$dur_abpain, na.rm=TRUE) # there's one person who has 2018 as a response -- need to clean? thought I did already 
+
+# make a new dataset with only these questions (plus legitdx and romesend__1), to triangulate
+abpain_qs <- alldata_clean %>% 
+  dplyr::select(
+    study_id,
+    ibs_tot_re,
+    ibs_cat_re,
+    pp_abpain,
+    dur_abpain,
+    legitdx,
+    romesend___1
+  ) %>% 
+  left_join(abpain_add, by = "study_id") %>% 
+  mutate(both_gi_and_pain = ifelse(pp_abpain==1 & other_gi_sx==1, 1, 0))
+
+# subset of those who were included based on dx
+abpain_qs_dx <- abpain_qs %>% 
+  filter(romesend___1==0)
+
+# IBS symptom severity, bloating severity, satisfaction with bowel habits, 'yes' to other gi symptoms besides pain
+abpain_qs_dx %>% dplyr::count(ibs_cat_re) %>% mutate(perc = n / sum(n))
+
+abpain_qs_dx %>% dplyr::count(other_gi_sx==1) %>% mutate(perc = n / sum(n)) #21 who said 'no' 
+
+abpain_qs_dx %>% dplyr::count(other_gi_sx==0 & ibs_cat_re == "severe IBS symptoms") %>% mutate(perc = n / sum(n))
+
+abpain_qs_dx %>% dplyr::count(other_gi_sx!=1 & bowel_habit_sat >=25) %>% mutate(perc = n / sum(n)) 
+# 12 who said 'no' but rated satisfaction with bowel habits less than 50
+# 16 who said 'no' but rated bowel habits less than 25 ()
+
+abpain_qs_dx %>% dplyr::count(bowel_habit_sat >=50) %>% mutate(perc = n / sum(n)) # 76% rated dissatisfaction with bowel habits as at least 50 out of 100 
+
+abpain_qs_dx %>% dplyr::count(bowel_habit_sat <50 & other_gi_sx==1) %>% mutate(perc = n / sum(n)) # 39 people didn't rate their bowel dissatisfaction as at least 50, of those, 30 said 'yes' to other symptoms (77%)
+```
+Results (ended up not using):
+
+We could do a symptom sub-analysis with IBS-SS for bowel habit symptoms to say something like “x% of participants reported significant bowel habit symptoms, supporting the sample characterization as predominantly IBS patients”? Or is this not necessary?
+ 
+IBS-SS: mean = 228 (94); Range: 0 – 460
+•	The person who scored 0 on IBS symptoms met ROME IV IBS criteria on enrollment
+•	Of the 8 people in the “little to no symptom severity” category (average score less than 25 out of 100 for severeity of ab pain, frequency of ab pain, severeity of ab bloating, dissatisfaction with bowel habits, interference with quality of life) 6 said “yes” to “experiencing irritable bowel or abdominal pain at least once a week in the past 3 months”, 6 said “yes” to “experiencing any other digestive problems such as reflux, constipation, diarrhea, or bloating, at least once a week in the past 3 months?”, all said “yes” to at least one of those two questions, and 4 said yes to both
+Maximum score someone could get if they only had abdominal pain: 300 (so everyone with ‘severe’ symptoms has to have at least some other symptoms)
+27% of potential participants who were sent ROME on screening (i.e., because they did not have a diagnosis in the last 5 years) were excluded due to not meeting criteria 
+Of the people who were included based on a recent diagnosis:
+•	IBS symptom severity: 4% little to no symptom severity, 28% mild IBS symptoms, 47% moderate IBS symptoms, 19% severe IBS symtpoms, 2% did not complete
+•	76% rated dissatisfaction with bowel habits as at least 50 out of 100 (most dissatisfaction)
+o	Of the people who rated their dissatisfaction as less than 50, 77% said ‘yes’ to “experiencing any other digestive problems such as reflux, constipation, diarrhea, or bloating, at least once a week in the past 3 months” 
+•	87% said “yes” to “experiencing any other digestive problems such as reflux, constipation, diarrhea, or bloating, at least once a week in the past 3 months?”
+o	Of the people who said “no” to the other symptoms question, 
+	57% rated disssatisfaction with bowel habits as at least 50 out 100 (most dissatisfaction)
+	76% rated disssatisfaction with bowel habits as at least 25 out of 100
+So, 5.5% of those were not screened with ROME criteria said pretty satisfied with bowels + ‘no’ to other sytmpoms
+
+# IASP Poster Subgroup Differences Figure
+2 x 2 grid: good vs High SES, High distress
+Parental protective behavior means [95% CI]: 
+- High SES, High Functioning: 1.46 [1.26, 1.66]
+- Low SES, High Pain Burden: 1.78 [1.68, 1.98]	
+- High SES, High Distress: 1.57 [1.32, 1.82]  
+
+Emotional funcitoning means [95% CI]:
+- High SES, High Functioning: 71.99 []
+- Low SES, High Pain Burdne: 53.82 []
+- High SES, High Distress: 60.66 []
+
+-6.34 
+```{r}
+library(patchwork)
+
+# bar chart with error bars -- parental protection, high ses vs low ses
+group13_protect <- data.frame(
+  group = c("High SES, High Functioning", "Low SES, High Pain Burden"),
+  mean = c(1.46, 1.88),
+  error = c(0.077, 0.10)  # SE values # 1.606
+)
+
+p1 <- ggplot(group13_protect, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "Low SES, High Pain Burden" = "orange"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Parental Protective Behavior"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "none"
+  )
+
+group12_protect <- data.frame(
+  group = c("High SES, High Functioning", "High SES, High Parent Distress"),
+  mean = c(1.46, 1.61),
+  error = c(0.077, 0.09)  # SE values # 1.606
+)
+
+p3 <- ggplot(group12_protect, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "High SES, High Parent Distress" = "#988CBF"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Parental Protective Behavior"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "none"
+  )
+
+# group 1 vs group 3 -- emotional functioning
+group13_emo <- data.frame(
+  group = c("High SES, High Functioning", "Low SES, High Pain Burden"),
+  mean = c(71.99, 60.66),
+  error = c(1.79, 3.04)  # SE values # 1.606
+)
+
+p2 <- ggplot(group13_emo, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "Low SES, High Pain Burden" = "orange"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Child Emotional Functioning (t-score)"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "none"
+  )
+
+# group 1 vs group 3 -- emotional functioning
+group12_protect <- data.frame(
+  group = c("High SES, High Functioning", "High SES, High Parent Distress"),
+  mean = c(71.99, 53.83),
+  error = c(1.79, 2.22)  # SE values # 1.606
+)
+
+p4 <- ggplot(group12_protect, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "High SES, High Parent Distress" = "#988CBF"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Child Emotional Functioning (t-score)"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "none"
+  )
+
+(p1 | p2) /
+(p3 | p4) +
+  plot_annotation(
+    title = NULL
+  )
+
+# new version: two graphs -- one parental protective behavior row, one child emotional functioning row
+# bar chart with error bars -- parental protection, high ses vs low ses
+group_protect <- data.frame(
+  group = c("High SES, High Functioning", "High SES, High Distress", "Low SES, High Pain Burden"),
+  mean = c(1.46, 1.61, 1.88),
+  error = c(0.077, 0.09, 0.10)  # SE values # 1.606
+)
+
+group_protect$group <- factor(group_protect$group, levels = c("High SES, High Functioning", "High SES, High Distress", "Low SES, High Pain Burden"))
+
+ggplot(group_protect, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "High SES, High Distress" = "#988CBF",
+      "Low SES, High Pain Burden" = "orange"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Parental Protective Behavior"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 18),
+    legend.position = "none"
+  )
+
+ggsave("tables/protect_figure_poster.png", dpi = 1000, width = 9, height = 4)
+
+group_emotion <- data.frame(
+  group = c("High SES, High Functioning", "High SES, High Distress", "Low SES, High Pain Burden"),
+  mean = c(71.99, 53.83, 60.66),
+  error = c(1.79, 2.22, 3.04)  # SE values # 1.606
+)
+
+group_emotion$group <- factor(group_emotion$group, levels = c("High SES, High Functioning", "High SES, High Distress", "Low SES, High Pain Burden"))
+
+ggplot(group_emotion, aes(x = group, y = mean, fill = group)) +
+  geom_col(color = "black", width = 0.6) +
+  geom_errorbar(
+    aes(ymin = mean - error, ymax = mean + error),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High SES, High Functioning" = "#99CB7B",
+      "High SES, High Distress" = "#988CBF",
+      "Low SES, High Pain Burden" = "orange"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Child Emotional Functioning"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "Arial"),
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 18),
+    legend.position = "none"
+  )
+
+ggsave("tables/emotion_figure_poster.png", dpi = 1000, width = 9, height = 4)
+```
+

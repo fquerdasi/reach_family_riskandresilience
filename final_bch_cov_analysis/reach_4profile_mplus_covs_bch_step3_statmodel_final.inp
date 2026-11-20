@@ -1,0 +1,226 @@
+
+TITLE: LPA 4 profile syntax, BCH Step 3: read in the BCH weights and covariates, specify models;
+! create a file with the BCH weights and covariates in the same file
+
+DATA: 
+FILE IS LPA4_final_covs.dat; 
+
+VARIABLE: 
+NAMES ARE parent_college fammeal_days_cat income_to_needs
+total_hh_pain dpfreq_tot phq_tot gad_tot pcs_tot mspss_tot
+panaspa famresil_total ibs_tot_re ql_efs arcsp_tot child_age
+parent_age oldest_child child_female parent_female W1-W4 study_id;
+
+USEVARIABLES ARE child_age parent_age oldest_child child_female parent_female 
+ql_efs arcsp_tot W1-W4 income_to_needs total_hh_pain dpfreq_tot phq_tot gad_tot 
+pcs_tot mspss_tot panaspa famresil_total ibs_tot_re parent_college; 
+
+CATEGORICAL ARE parent_college; ! need to add fammeal_days_cat
+
+IDVARIABLE = study_id;
+
+CLASSES = c (4);
+
+TRAINING = W1-W4 (bch);
+
+MISSING = *; 
+
+ANALYSIS: 
+TYPE = MIXTURE; 
+STARTS = 0;
+! Starts now = 0 because the BCH weights are specifying the classes based upon the prior model run
+
+MODEL:
+%OVERALL%
+c ON child_age parent_age oldest_child child_female parent_female; 
+
+  %C#1%
+    [QL_EFS] (m1_efs);
+    [ARCSP_TOT] (m1_arc);
+    [income_to_needs] (m1_income);
+    [total_hh_pain] (m1_hpain);
+    [dpfreq_tot] (m1_pstress);
+    [phq_tot] (m1_depress);
+    [gad_tot] (m1_gad);
+    [pcs_tot] (m1_catat);
+    [mspss_tot] (m1_supp);
+    [panaspa] (m1_posaff);
+    [famresil_total] (m1_famres);
+    [ibs_tot_re] (m1_ibs);
+    [parent_college$1] (m1_edu);
+
+
+  %C#2%
+    [QL_EFS] (m2_efs);
+    [ARCSP_TOT] (m2_arc);
+    [income_to_needs] (m2_income);
+    [total_hh_pain] (m2_hpain);
+    [dpfreq_tot] (m2_pstress);
+    [phq_tot] (m2_depress);
+    [gad_tot] (m2_gad);
+    [pcs_tot] (m2_catat);
+    [mspss_tot] (m2_supp);
+    [panaspa] (m2_posaff);
+    [famresil_total] (m2_famres);
+    [ibs_tot_re] (m2_ibs);
+    [parent_college$1] (m2_edu);
+
+  %C#3%
+    [QL_EFS] (m3_efs);
+    [ARCSP_TOT] (m3_arc);
+    [income_to_needs] (m3_income);
+    [total_hh_pain] (m3_hpain);
+    [dpfreq_tot] (m3_pstress);
+    [phq_tot] (m3_depress);
+    [gad_tot] (m3_gad);
+    [pcs_tot] (m3_catat);
+    [mspss_tot] (m3_supp);
+    [panaspa] (m3_posaff);
+    [famresil_total] (m3_famres);
+    [ibs_tot_re] (m3_ibs);
+    [parent_college$1] (m3_edu);   
+   
+  %C#4%
+    [QL_EFS] (m4_efs);
+    [ARCSP_TOT] (m4_arc);
+    [income_to_needs] (m4_income);
+    [total_hh_pain] (m4_hpain);
+    [dpfreq_tot] (m4_pstress);
+    [phq_tot] (m4_depress);
+    [gad_tot] (m4_gad);
+    [pcs_tot] (m4_catat);
+    [mspss_tot] (m4_supp);
+    [panaspa] (m4_posaff);
+    [famresil_total] (m4_famres);
+    [ibs_tot_re] (m4_ibs);
+    [parent_college$1] (m4_edu);
+
+MODEL CONSTRAINT:
+
+  NEW(
+    efs_12 efs_13 efs_23 efs_14 efs_24 efs_34
+    arc_12 arc_13 arc_23 arc_14 arc_24 arc_34
+    income_12 income_13 income_23 income_14 income_24 income_34
+    hpain_12 hpain_13 hpain_23 hpain_14 hpain_24 hpain_34
+    pstress_12 pstress_13 pstress_23 pstress_14 pstress_24 pstress_34
+    depress_12 depress_13 depress_23 depress_14 depress_24 depress_34
+    gad_12 gad_13 gad_23 gad_14 gad_24 gad_34
+    catat_12 catat_13 catat_23 catat_14 catat_24 catat_34
+    supp_12 supp_13 supp_23 supp_14 supp_24 supp_34
+    posaff_12 posaff_13 posaff_23 posaff_14 posaff_24 posaff_34
+    famres_12 famres_13 famres_23 famres_14 famres_24 famres_34
+    ibs_12 ibs_13 ibs_23 ibs_14 ibs_24 ibs_34
+    edu_12 edu_13 edu_23 edu_14 edu_24 edu_34
+  );
+
+  ! QL_EFS pairwise differences
+  efs_12 = m1_efs - m2_efs;
+  efs_13 = m1_efs - m3_efs;
+  efs_23 = m2_efs - m3_efs;
+  efs_14 = m1_efs - m4_efs;
+  efs_24 = m2_efs - m4_efs;
+  efs_34 = m3_efs - m4_efs;
+
+  ! ARCSP_TOT pairwise differences
+  arc_12 = m1_arc - m2_arc;
+  arc_13 = m1_arc - m3_arc;
+  arc_23 = m2_arc - m3_arc;
+  arc_14 = m1_arc - m4_arc;
+  arc_24 = m2_arc - m4_arc;
+  arc_34 = m3_arc - m4_arc;
+  
+  ! income
+  income_12 = m1_income - m2_income;
+  income_13 = m1_income - m3_income;
+  income_23 = m2_income - m3_income;
+  income_14 = m1_income - m4_income;
+  income_24 = m2_income - m4_income;
+  income_34 = m3_income - m4_income;
+  
+  ! total household pain
+  hpain_12 = m1_hpain - m2_hpain;
+  hpain_13 = m1_hpain - m3_hpain;
+  hpain_23 = m2_hpain - m3_hpain;
+  hpain_14 = m1_hpain - m4_hpain;
+  hpain_24 = m2_hpain - m4_hpain;
+  hpain_34 = m3_hpain - m4_hpain;
+  
+  ! parenting stress
+  pstress_12 = m1_pstress - m2_pstress;
+  pstress_13 = m1_pstress - m3_pstress;
+  pstress_23 = m2_pstress - m3_pstress;
+  pstress_14 = m1_pstress - m4_pstress;
+  pstress_24 = m2_pstress - m4_pstress;
+  pstress_34 = m3_pstress - m4_pstress;
+  
+  ! depression
+  depress_12 = m1_depress - m2_depress;
+  depress_13 = m1_depress - m3_depress;
+  depress_23 = m2_depress - m3_depress;
+  depress_14 = m1_depress - m4_depress;
+  depress_24 = m2_depress - m4_depress;
+  depress_34 = m3_depress - m4_depress;
+  
+  ! anxiety
+  gad_12 = m1_gad - m2_gad; 
+  gad_13 = m1_gad - m3_gad;
+  gad_23 = m2_gad - m3_gad;
+  gad_14 = m1_gad - m4_gad;
+  gad_24 = m2_gad - m4_gad;
+  gad_34 = m3_gad - m4_gad;
+  
+  ! catastrophizing
+  catat_12 = m1_catat - m2_catat;
+  catat_13 = m1_catat - m3_catat;
+  catat_23 = m2_catat - m3_catat;
+  catat_14 = m1_catat - m4_catat;
+  catat_24 = m2_catat - m4_catat;
+  catat_34 = m3_catat - m4_catat;
+  
+  ! social support
+  supp_12 = m1_supp - m2_supp;
+  supp_13 = m1_supp - m3_supp;
+  supp_23 = m2_supp - m3_supp;
+  supp_14 = m1_supp - m4_supp;
+  supp_24 = m2_supp - m4_supp;
+  supp_34 = m3_supp - m4_supp;
+  
+  ! positive affect
+  posaff_12 = m1_posaff - m2_posaff;
+  posaff_13 = m1_posaff - m3_posaff;
+  posaff_23 = m2_posaff - m3_posaff;
+  posaff_14 = m1_posaff - m4_posaff;
+  posaff_24 = m2_posaff - m4_posaff;
+  posaff_34 = m3_posaff - m4_posaff;
+  
+  ! family resilience
+  famres_12 = m1_famres - m2_famres;
+  famres_13 = m1_famres - m3_famres;
+  famres_23 = m2_famres - m3_famres;
+  famres_14 = m1_famres - m4_famres;
+  famres_24 = m2_famres - m4_famres;
+  famres_34 = m3_famres - m4_famres;
+  
+  ! ibs sx
+  ibs_12 = m1_ibs - m2_ibs;
+  ibs_13 = m1_ibs - m3_ibs;
+  ibs_23 = m2_ibs - m3_ibs;
+  ibs_14 = m1_ibs - m4_ibs;
+  ibs_24 = m2_ibs - m4_ibs;
+  ibs_34 = m3_ibs - m4_ibs;
+  
+  ! parent education
+  edu_12 = m1_edu - m2_edu;
+  edu_13 = m1_edu - m3_edu;
+  edu_23 = m2_edu - m3_edu;
+  edu_14 = m1_edu - m4_edu;
+  edu_24 = m2_edu - m4_edu;
+  edu_34 = m3_edu - m4_edu;
+  
+OUTPUT: 
+TECH1 TECH8 CINTERVAL STDYX; 
+TECH11 TECH14; 
+! TECH1 provides parameter specifications and starting values for the analysis 
+! TECH8 provides optimization history for this analysis type 
+! TECH11 provides LRT results 
+! TECH14 provides bootstrapped LRT test
